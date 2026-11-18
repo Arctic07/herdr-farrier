@@ -50,14 +50,20 @@ Options:
 
 Running it twice is safe: anything already identical is left alone (`=`).
 
+The interface uses HarmonyOS Sans SC, bundled in `mods/farrier/fonts/`
+under the HarmonyOS Sans Fonts License Agreement. The terminals keep a
+monospace font. Herdr loads these fonts at start; restart it once after the
+first install if the window was already open.
+
 ## What's inside
 
 | File | What it is |
 |---|---|
 | `layouts/farrier.json` | the window: sidebar, tabs, framed panes, hidden Changes panel, bottom strip |
 | `layouts/farrier.svg` | the picture Settings shows for the layout |
-| `themes/farrier.json` | dark leather and brass; offered only in this layout |
+| `themes/farrier.json` | charcoal, paper-white and cyan; offered only in this layout |
 | `mods/farrier/` | the bottom strip: machine, space, branch, agents waiting |
+| `mods/farrier/fonts/` | HarmonyOS Sans SC, and the license that covers it |
 | `mods/farrier-git/` | the Changes panel: staged files, branches, diff window, commit box |
 | `keys.pack.json` | the layout's key section, merged only with `--keys` |
 | `install.tsv` | what gets installed, and where |

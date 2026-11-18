@@ -2,6 +2,7 @@
   "id": "root",
   "type": "row",
   "theme": "farrier",
+  "ui_font": "HarmonyOS Sans SC",
   "preview": "layouts/farrier.svg",
   "background": "canvas",
   "divider": { "width": 1, "color": "border" },

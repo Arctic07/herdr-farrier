@@ -14,4 +14,5 @@ Ctrl+Shift+A      next agent that needs you      layout:farrier
 ```
 
 The strip uses theme colors only, so it follows the Farrier theme, any other
-theme, and light or dark.
+theme, and light or dark. Its type is HarmonyOS Sans SC, bundled under the
+HarmonyOS Sans license in `fonts/`.

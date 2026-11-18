@@ -6,4 +6,11 @@ This product includes content derived from the Herdr app
 licensed under the Apache License, Version 2.0.
 
 The layout structure in layouts/farrier.json starts from Herdr's shipped main
-layout; mods/ and themes/ hold Farrier's own work.
+layout; mods/ and themes/ hold Farrier's own work, except the HarmonyOS
+Sans fonts noted below.
+
+The HarmonyOS Sans SC fonts in mods/farrier/fonts/
+HarmonyOS_Sans_SC_Regular.ttf, mods/farrier/fonts/HarmonyOS_Sans_SC_Medium.ttf
+and mods/farrier/fonts/HarmonyOS_Sans_SC_Bold.ttf are Copyright 2021 Huawei
+Device Co., Ltd. and used under the HarmonyOS Sans Fonts License Agreement.
+The agreement is in mods/farrier/fonts/LICENSE-HarmonyOS-Sans.txt.
