@@ -5,3 +5,4 @@ farrier-theme	theme	themes/farrier.json	themes/farrier.json	Farrier's theme, off
 farrier-layout	layout	layouts/farrier.json	layouts/farrier.json	The Farrier layout
 farrier-preview	file	layouts/farrier.svg	layouts/farrier.svg	Picture shown for the layout in Settings
 farrier-mod	mod	mods/farrier	mods/farrier	Bottom strip: machine, space, branch, how many agents wait
+farrier-git	mod	mods/farrier-git	mods/farrier-git	Changes panel: staged files, branches, stashes and commit messages

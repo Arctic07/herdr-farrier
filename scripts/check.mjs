@@ -96,15 +96,17 @@ for (const row of rows.filter((r) => r.kind === "layout")) {
   }
 }
 
-// Keys stay in this layout's own section, and name a command this mod owns.
+// Keys stay in this layout's own sections, and name a command one of our mods owns.
 const pack = parseJson(join(root, "keys.pack.json"), bad);
 if (pack) {
+  const sections = ["layout:farrier", ...ownMods.map((name) => `mod:${name}`)];
+  const commands = ownMods.map((name) => `${name}.`);
   for (const [section, binds] of Object.entries(pack)) {
-    if (!["layout:farrier", "mod:farrier"].includes(section)) bad(`keys.pack.json: ${section} is not this layout's section`);
+    if (!sections.includes(section)) bad(`keys.pack.json: ${section} is not this layout's section`);
     if (!binds || typeof binds !== "object") bad(`keys.pack.json: ${section} is not an object`);
     for (const [key, action] of Object.entries(binds ?? {})) {
-      if (typeof action !== "string" || !action.startsWith("farrier.")) {
-        bad(`keys.pack.json: ${key} -> ${action} is not a farrier command`);
+      if (typeof action !== "string" || !commands.some((prefix) => action.startsWith(prefix))) {
+        bad(`keys.pack.json: ${key} -> ${action} is not a command one of our mods owns`);
       }
     }
   }

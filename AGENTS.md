@@ -1,7 +1,7 @@
 # Farrier — rules for this repository
 
-Farrier is a Herdr add-on: one layout, one mod, one theme, one installer. It is
-not a fork of Herdr and never ships the Herdr binary.
+Farrier is a Herdr add-on: one layout, the mods it uses, one theme, one
+installer. It is not a fork of Herdr and never ships the Herdr binary.
 
 ## Names
 

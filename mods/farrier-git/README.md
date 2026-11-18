@@ -1,0 +1,39 @@
+# Farrier Git
+
+The Changes panel, opened by the **Changes** button in the tab bar. It follows
+the focused pane's folder: staged and unstaged files, branches, stashes, a diff
+window, and a commit box above the file list. The ellipsis beside the title
+opens push, pull, fetch, branches and stashes.
+
+## What it does
+
+- **Files**: staged changes and working changes are separate groups. A row
+  stages, unstages, or discards one file; a group header stages or unstages all
+  of them. Clicking a file opens its diff in a window.
+- **Branches**: the branch chip opens the branch list; the ellipsis menu adds
+  merge, rebase, create, create from a source, rename, delete, delete a remote
+  branch, publish, and the full list. Remote branches check out as tracking
+  branches.
+- **Remote**: the menu pushes and pulls separately. Push publishes a branch
+  without an upstream by running `git push -u origin <branch>`; Pull stays
+  disabled until the branch has an upstream. Fetch updates all remotes.
+- **Stashes**: the menu creates tracked, untracked, or staged-only stashes,
+  applies or pops the newest one, and opens a stash list to apply, pop, or drop
+  a specific entry. Dropping all stashes asks first.
+- **Commit**: the message box sits above the files and commits staged changes
+  with `Ctrl+Enter`. The Generate button runs `pi` with the person's Pi
+  configuration — the default provider and model in
+  `~/.pi/agent/settings.json` — on the staged diff, and writes the returned
+  message into the box. It is disabled while nothing is staged. Generation is
+  for local repositories only.
+
+File icons are chosen from the name and extension and tinted from the theme.
+The mod uses theme colors only, so it follows light and dark themes.
+
+## Limits
+
+- A diff window shows the first 5,000 lines and truncates lines over 4,000
+  characters.
+- File lists show the first 1,000 changed paths.
+- Pi generation sends at most 24 kB of diff and is not offered for folders on
+  another machine.
