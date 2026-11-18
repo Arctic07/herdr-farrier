@@ -1,0 +1,27 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Static checks
+        run: node scripts/check.mjs
+
+      - name: Shell syntax
+        run: sh -n install.sh && sh -n tests/install.test.sh
+
+      - name: Catalogue and validation (PowerShell)
+        run: pwsh -NoProfile -File install.ps1 --list
+
+      - name: Installer behaviour
+        run: sh tests/install.test.sh

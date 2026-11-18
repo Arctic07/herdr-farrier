@@ -1,0 +1,4 @@
+# Keep shell scripts and JSON at LF on every platform: a CRLF install.sh fails
+# in sh, and the installers compare file contents byte for byte.
+* text=auto eol=lf
+*.sh text eol=lf

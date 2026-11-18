@@ -1,0 +1,10 @@
+# Herdr writes these into a mod folder when it loads it; they follow the app's version.
+mods/*/gpui-kit.d.ts
+mods/*/herdr.d.ts
+mods/*/jsconfig.json
+
+# Local scratch: the installer stages and backs up inside the Herdr home, never here.
+.farrier-stage/
+*.log
+.DS_Store
+Thumbs.db

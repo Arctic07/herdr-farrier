@@ -1,0 +1,5 @@
+{
+  "layout:farrier": {
+    "ctrl-shift-a": "farrier.next"
+  }
+}
