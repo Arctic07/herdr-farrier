@@ -36,7 +36,11 @@ import {
 } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
-const MAX_FILES = 1000;
+const MAX_FILES = 5000;
+const MAX_STATS_FILES = 500;
+const FILE_PAGE = 100;
+const FILE_PAGE_MAX = 300;
+const FILE_FILTER_MIN = 30;
 const MAX_DIFF = 24000;
 const ICON = (name) => `mods/farrier-git/icons/${name}.svg`;
 
@@ -480,7 +484,7 @@ export default class FarrierGit extends View {
     this.note = null;
     this.noteKind = "";
     this.typing = false;
-    this.focused = { filter: false, create: false, rename: false, message: false };
+    this.focused = { filter: false, create: false, rename: false, message: false, files: false };
     this.loading = false;
     this.busy = false;
     this.generating = false;
@@ -495,6 +499,10 @@ export default class FarrierGit extends View {
     this.hasHead = false;
     this.staged = [];
     this.changes = [];
+    this.fileTotal = 0;
+    this.hasUntracked = false;
+    this.statsSkipped = false;
+    this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
     this.notRepo = false;
     this.error = null;
     this.limited = false;
@@ -530,6 +538,7 @@ export default class FarrierGit extends View {
     this.renameText = "";
 
     this.message = "";
+    this.fileFilterText = "";
     this.messageState = TextareaState.new({ placeholder: "Commit message", rows: 3 });
     this.messageState.set_auto_grow(2, 5);
     this.messageState.on("change", (_event, cx) => {
@@ -544,6 +553,23 @@ export default class FarrierGit extends View {
     });
     this.messageState.on("blur", (_event, cx) => {
       this.focused.message = false;
+      this.typing = false;
+      cx.notify();
+    });
+
+    this.fileFilter = InputState.new({ placeholder: "Filter changed files" });
+    this.fileFilter.on("change", (_event, cx) => {
+      this.fileFilterText = this.fileFilter.value();
+      this.resetFilePages();
+      cx.notify();
+    });
+    this.fileFilter.on("focus", (_event, cx) => {
+      this.focused.files = true;
+      this.typing = true;
+      cx.notify();
+    });
+    this.fileFilter.on("blur", (_event, cx) => {
+      this.focused.files = false;
       this.typing = false;
       cx.notify();
     });
@@ -648,7 +674,7 @@ export default class FarrierGit extends View {
     try {
       this.watchPromise?.cancel();
     } catch {}
-    for (const state of [this.messageState, this.branchFilter, this.newBranch, this.renameInput]) {
+    for (const state of [this.messageState, this.fileFilter, this.branchFilter, this.newBranch, this.renameInput]) {
       try {
         state?.release();
       } catch {}
@@ -704,6 +730,10 @@ export default class FarrierGit extends View {
       this.notRepo = false;
       this.error = null;
       this.limited = false;
+      this.fileTotal = 0;
+      this.hasUntracked = false;
+      this.statsSkipped = false;
+      this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
       this.discardTarget = null;
       this.discardAll = false;
       this.folded = { staged: false, changes: false };
@@ -727,6 +757,8 @@ export default class FarrierGit extends View {
       this.stashLoading = false;
       this.stashError = null;
       this.stashConfirm = null;
+      this.fileFilterText = "";
+      this.fileFilter.set_value("");
       this.branchFilterText = "";
       this.branchFilter.set_value("");
       this.newBranchText = "";
@@ -755,6 +787,10 @@ export default class FarrierGit extends View {
           this.behind = 0;
           this.notRepo = true;
           this.limited = false;
+          this.fileTotal = 0;
+          this.hasUntracked = false;
+          this.statsSkipped = false;
+          this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
           this.staged = [];
           this.changes = [];
           return;
@@ -764,7 +800,13 @@ export default class FarrierGit extends View {
         if (status.code !== 0) throw new Error(gitError(status));
         if (this.context !== ctx) return;
         const parsed = parseStatus(status.stdout);
-        const stats = parsed.files.length ? await loadStats(root, ctx.on) : { staged: {}, work: {} };
+        let untracked = false;
+        let tracked = 0;
+        for (const entry of parsed.files) {
+          if (entry.untracked) untracked = true;
+          else tracked++;
+        }
+        const stats = tracked && tracked <= MAX_STATS_FILES ? await loadStats(root, ctx.on) : { staged: {}, work: {} };
         if (this.context !== ctx) return;
 
         const staged = [];
@@ -804,6 +846,9 @@ export default class FarrierGit extends View {
         this.hasHead = parsed.branch.hasHead;
         this.staged = staged;
         this.changes = changes;
+        this.fileTotal = parsed.files.length;
+        this.hasUntracked = untracked;
+        this.statsSkipped = tracked > MAX_STATS_FILES;
         this.notRepo = false;
         this.limited = parsed.files.length > MAX_FILES;
         this.error = null;
@@ -824,6 +869,10 @@ export default class FarrierGit extends View {
           this.ahead = 0;
           this.behind = 0;
           this.limited = false;
+          this.fileTotal = 0;
+          this.hasUntracked = false;
+          this.statsSkipped = false;
+          this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
           this.staged = [];
           this.changes = [];
           this.notRepo = false;
@@ -998,7 +1047,7 @@ export default class FarrierGit extends View {
     const ctx = this.context;
     const root = this.root;
     const on = ctx.on;
-    const untracked = this.changes.some((file) => file.fresh);
+    const untracked = this.hasUntracked;
     this.busy = true;
     this.note = null;
     cx.spawn(async (cx) => {
@@ -2555,24 +2604,114 @@ export default class FarrierGit extends View {
       .when(Boolean(this.note), (el) => el.child(div().text_size(10.5).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)));
   }
 
+  resetFilePages() {
+    this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
+  }
+
+  fileRows(kind) {
+    const files = kind === "staged" ? this.staged : this.changes;
+    const query = this.fileFilterText.trim().toLowerCase();
+    return query ? files.filter((file) => file.path.toLowerCase().includes(query)) : files;
+  }
+
+  showMoreFiles(kind, cx) {
+    const limit = this.fileLimit[kind] ?? FILE_PAGE;
+    if (limit >= FILE_PAGE_MAX) return;
+    this.fileLimit[kind] = Math.min(limit + FILE_PAGE, FILE_PAGE_MAX);
+    cx.notify();
+  }
+
+  clearFileFilter(cx) {
+    this.fileFilterText = "";
+    this.fileFilter.set_value("");
+    this.resetFilePages();
+    cx.notify();
+  }
+
+  renderFileFilter(t, cx, query) {
+    return h_flex()
+      .flex_none()
+      .px(9)
+      .pt(6)
+      .pb(4)
+      .child(
+        h_flex()
+          .flex_1()
+          .min_w(0)
+          .h(30)
+          .gap(6)
+          .items_center()
+          .rounded(9)
+          .border_1()
+          .border_color(this.focused.files ? t.accent : t.input)
+          .bg(t.background)
+          .px(8)
+          .child(icon("search", t.dim, 12))
+          .child(div().flex_1().min_w(0).child(Input.new(this.fileFilter).size_full().text_size(11.5).text_color(t.foreground)))
+          .when(Boolean(query), (el) => el.child(iconButton(t, "farrier-git-file-filter-clear", "x", "Clear file filter", (cx) => this.clearFileFilter(cx), { size: 20, glyphSize: 11, stopDrag: true }))),
+      );
+  }
+
+  renderMore(t, kind, all, shown, cx) {
+    const remaining = all.length - shown;
+    const capped = shown >= FILE_PAGE_MAX;
+    return h_flex()
+      .id(`farrier-git-more-${kind}`)
+      .flex_none()
+      .h(30)
+      .mx(6)
+      .px(8)
+      .gap(8)
+      .items_center()
+      .rounded(7)
+      .child(
+        div()
+          .flex_1()
+          .min_w(0)
+          .truncate()
+          .text_size(10)
+          .text_color(t.dim)
+          .child(capped ? `Showing ${shown} of ${all.length}. Filter to narrow.` : `${shown} of ${all.length}`),
+      )
+      .when(!capped, (el) => el.child(button(t, `farrier-git-more-${kind}-button`, `Show ${Math.min(FILE_PAGE, remaining)} more`, "ghost", (cx) => this.showMoreFiles(kind, cx), { h: 26, px: 8 })));
+  }
+
   renderFiles(t, cx) {
     const busy = this.loading || this.busy || this.generating;
+    const query = this.fileFilterText.trim();
+    const staged = this.fileRows("staged");
+    const changes = this.fileRows("changes");
+    const stagedView = staged.slice(0, this.fileLimit.staged);
+    const changesView = changes.slice(0, this.fileLimit.changes);
+    const original = this.staged.length + this.changes.length;
+    const showFilter = Boolean(query) || original >= FILE_FILTER_MIN || this.limited;
+    const notes = [];
+    if (this.limited) notes.push(`Only the first ${MAX_FILES} of ${this.fileTotal} changed files are listed.`);
+    if (this.statsSkipped) notes.push("Line stats are hidden for large change sets.");
     const rows = [];
-    if (this.staged.length) rows.push(this.group(t, "staged", "Staged Changes", this.staged, busy, cx));
-    if (this.changes.length) rows.push(this.group(t, "changes", "Changes", this.changes, busy, cx));
+    if (staged.length) rows.push(this.group(t, "staged", "Staged Changes", staged, stagedView, busy, cx));
+    if (changes.length) rows.push(this.group(t, "changes", "Changes", changes, changesView, busy, cx));
     return v_flex()
-      .id("farrier-git-files")
+      .id("farrier-git-files-panel")
       .flex_1()
       .min_h(0)
-      .overflow_y_scrollbar()
-      .p(6)
-      .gap(2)
-      .when(Boolean(this.discardTarget), (el) => el.child(this.renderDiscard(t, cx)))
-      .when(Boolean(this.discardAll), (el) => el.child(this.renderDiscardAll(t, cx)))
-      .children(rows)
-      .when(Boolean(this.error), (el) => el.child(div().p(8).text_size(11).text_color(t.blocked).child(this.error)))
-      .when(!this.staged.length && !this.changes.length && !this.loading && !this.error, (el) => el.child(this.renderClean(t)))
-      .when(this.limited, (el) => el.child(div().px(8).py(6).text_size(10.5).text_color(t.dim).child(`Showing the first ${MAX_FILES} changed files`)));
+      .when(showFilter, (el) => el.child(this.renderFileFilter(t, cx, query)))
+      .children(notes.map((note) => div().px(9).pb(3).text_size(10).text_color(t.dim).child(note)))
+      .child(
+        v_flex()
+          .id("farrier-git-files")
+          .flex_1()
+          .min_h(0)
+          .overflow_y_scrollbar()
+          .p(6)
+          .gap(2)
+          .when(Boolean(this.discardTarget), (el) => el.child(this.renderDiscard(t, cx)))
+          .when(Boolean(this.discardAll), (el) => el.child(this.renderDiscardAll(t, cx)))
+          .children(rows)
+          .when(Boolean(this.error), (el) => el.child(div().p(8).text_size(11).text_color(t.blocked).child(this.error)))
+          .when(!original && !this.loading && !this.error, (el) => el.child(this.renderClean(t)))
+          .when(Boolean(query) && Boolean(original) && !staged.length && !changes.length, (el) => el.child(div().p(8).text_size(11).text_color(t.dim).child("No files match"))),
+      );
   }
 
   renderClean(t) {
@@ -2606,7 +2745,7 @@ export default class FarrierGit extends View {
   }
 
   renderDiscardAll(t, cx) {
-    const untracked = this.changes.some((file) => file.fresh);
+    const untracked = this.hasUntracked;
     return h_flex()
       .id("farrier-git-discard-all-confirm")
       .flex_none()
@@ -2624,9 +2763,9 @@ export default class FarrierGit extends View {
       .child(button(t, "farrier-git-discard-all-yes", "Discard", "danger", (cx) => this.discardAllChanges(cx), { h: 26, px: 8 }));
   }
 
-  group(t, kind, label, files, busy, cx) {
-    const add = files.reduce((sum, file) => sum + (file.add || 0), 0);
-    const del = files.reduce((sum, file) => sum + (file.del || 0), 0);
+  group(t, kind, label, all, visible, busy, cx) {
+    const add = all.reduce((sum, file) => sum + (file.add || 0), 0);
+    const del = all.reduce((sum, file) => sum + (file.del || 0), 0);
     return v_flex()
       .id(`farrier-git-${kind}`)
       .flex_none()
@@ -2649,14 +2788,17 @@ export default class FarrierGit extends View {
           })
           .child(icon(this.folded[kind] ? "chevron-right" : "chevron-down", t.dim, 12))
           .child(label)
-          .child(pill(t, String(files.length), t.muted))
+          .child(pill(t, String(all.length), t.muted))
           .child(div().flex_1())
           .when(add > 0, (el) => el.child(div().text_size(10).text_color(t.ansi2).child(`+${add}`)))
           .when(del > 0, (el) => el.child(div().text_size(10).text_color(t.ansi1).child(`−${del}`)))
           .child(iconButton(t, `farrier-git-all-${kind}`, kind === "staged" ? "minus" : "plus", kind === "staged" ? "Unstage all" : "Stage all", (cx) => (kind === "staged" ? this.unstageAll(cx) : this.stageAll(cx)), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))
           .when(kind === "changes", (el) => el.child(iconButton(t, "farrier-git-discard-all", "undo", "Discard all changes", (cx) => this.askDiscardAll(cx), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))),
       )
-      .when(!this.folded[kind], (el) => el.children(files.map((file) => this.fileRow(t, kind, file, busy, cx))));
+      .when(!this.folded[kind], (el) =>
+        el.children(visible.map((file) => this.fileRow(t, kind, file, busy, cx)))
+          .when(all.length > visible.length, (el) => el.child(this.renderMore(t, kind, all, visible.length, cx))),
+      );
   }
 
   fileRow(t, kind, file, busy, cx) {

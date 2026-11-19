@@ -28,7 +28,8 @@ stack's `changes` child at `farrier-git`.
   stages, unstages, or discards one file; a group header stages or unstages all
   of them. The Changes header also discards all working changes after a
   confirmation; untracked files are deleted then. Clicking a file opens its diff
-  in a window.
+  in a window. Large change sets get a filter above the list; each group shows
+  100 rows and adds 100 at a time up to 300.
 - **Branches**: the branch chip opens the branch list; the ellipsis menu adds
   merge, rebase, create, create from a source, rename, delete, delete a remote
   branch, publish, and the full list. Remote branches check out as tracking
@@ -58,7 +59,9 @@ The mod uses theme colors only, so it follows light and dark themes.
 
 - A diff window shows the first 5,000 lines and truncates lines over 4,000
   characters.
-- File lists show the first 1,000 changed paths.
+- File lists read the first 5,000 changed paths. Each group shows 100 rows
+  and adds 100 at a time up to 300; a filter narrows the set. Line stats are
+  hidden above 500 tracked files.
 - The Branches drawer shows at most 200 local branches and keeps at most 200
   commits per branch, 20 at a time. One branch is expanded at a time. It reads
   local refs only; the full branch picker fetches remotes, up to 250.
