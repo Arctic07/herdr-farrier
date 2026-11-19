@@ -32,7 +32,12 @@ stack's `changes` child at `farrier-git`.
 - **Branches**: the branch chip opens the branch list; the ellipsis menu adds
   merge, rebase, create, create from a source, rename, delete, delete a remote
   branch, publish, and the full list. Remote branches check out as tracking
-  branches.
+  branches. A Branches drawer at the bottom of Changes starts collapsed; it
+  opens upward and lists local branches with their latest commit subject and
+  date. Expand a branch for its latest 20 commits with subject, author and age;
+  **Load more** adds another 20. Right-click a commit to copy its full SHA; a
+  green check at the left of that row confirms the copy. The drawer is for
+  reading history, not for switching branches.
 - **Remote**: the menu pushes and pulls separately. Push publishes a branch
   without an upstream by running `git push -u origin <branch>`; Pull stays
   disabled until the branch has an upstream. Fetch updates all remotes.
@@ -54,5 +59,8 @@ The mod uses theme colors only, so it follows light and dark themes.
 - A diff window shows the first 5,000 lines and truncates lines over 4,000
   characters.
 - File lists show the first 1,000 changed paths.
+- The Branches drawer shows at most 200 local branches and keeps at most 200
+  commits per branch, 20 at a time. One branch is expanded at a time. It reads
+  local refs only; the full branch picker fetches remotes, up to 250.
 - Pi generation sends at most 24 kB of diff and is not offered for folders on
   another machine.

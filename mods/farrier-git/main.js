@@ -191,18 +191,35 @@ function ago(at) {
   return `${Math.round(seconds / 86400 / 30)}mo`;
 }
 
-const REF_FORMAT = "%(HEAD)%09%(refname:short)%09%(upstream:short)%09%(committerdate:unix)";
+const REF_FORMAT = "%(HEAD)%09%(refname:short)%09%(upstream:short)%09%(committerdate:unix)%09%(subject)";
 const REMOTE_FORMAT = "%(refname:short)%09%(committerdate:unix)";
+const LOG_FORMAT = "%H%x09%an%x09%ct%x09%s";
+const BRANCH_COMMIT_PAGE = 20;
+const MAX_BRANCH_COMMITS = 200;
+const MAX_BRANCH_ROWS = 200;
 
 function parseLocalRefs(text) {
   return text
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
-      const [head, name, upstream, at] = line.split("\t");
-      return { name, upstream: upstream || "", at: Number(at) || 0, current: head?.trim() === "*" };
+      const parts = line.split("\t");
+      const [head, name, upstream, at] = parts;
+      return { name, upstream: upstream || "", at: Number(at) || 0, current: head?.trim() === "*", subject: parts.slice(4).join("\t").trim() };
     })
     .filter((branch) => branch.name);
+}
+
+function parseLog(text) {
+  return text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const parts = line.split("\t");
+      const [hash, author, at] = parts;
+      return { hash, author: author || "", at: Number(at) || 0, subject: parts.slice(3).join("\t").trim() };
+    })
+    .filter((commit) => commit.hash);
 }
 
 function parseRemoteRefs(text) {
@@ -493,8 +510,16 @@ export default class FarrierGit extends View {
     this.watched = null;
     this.watchPromise = null;
     this.branches = null;
+    this.branchesOpen = false;
     this.branchLoading = false;
     this.branchError = null;
+    this.branchExpanded = new Set();
+    this.copiedSha = null;
+    this.branchCommits = new Map();
+    this.branchCommitLimit = new Map();
+    this.branchCommitMore = new Map();
+    this.branchCommitsLoading = new Map();
+    this.branchCommitsError = new Map();
     this.branchFilterText = "";
     this.newBranchText = "";
     this.renaming = null;
@@ -683,7 +708,15 @@ export default class FarrierGit extends View {
       this.discardAll = false;
       this.folded = { staged: false, changes: false };
       this.branches = null;
+      this.branchesOpen = false;
       this.branchError = null;
+      this.branchExpanded = new Set();
+      this.copiedSha = null;
+      this.branchCommits = new Map();
+      this.branchCommitLimit = new Map();
+      this.branchCommitMore = new Map();
+      this.branchCommitsLoading = new Map();
+      this.branchCommitsError = new Map();
       this.renaming = null;
       this.deleting = null;
       this.deletingRemote = null;
@@ -778,6 +811,7 @@ export default class FarrierGit extends View {
         if (this.discardTarget && !changes.some((file) => file.path === this.discardTarget.path)) this.discardTarget = null;
         if (this.discardAll && !changes.length) this.discardAll = false;
         if (this.mode === "branches" && this.branches === null) this.loadBranches(cx);
+        if (this.mode === "changes" && this.branchesOpen && this.branches === null && !this.branchLoading) this.loadBranches(cx);
         if (this.mode === "stashes" && this.stashes === null) this.loadStashes(cx);
       } catch (error) {
         if (this.context === ctx) {
@@ -1012,6 +1046,7 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.message = "";
           this.messageState.set_value("");
+          this.branches = null;
           this.setNote(`Committed ${head.stdout.trim()}`, "success");
         }
       } catch (error) {
@@ -1136,7 +1171,10 @@ export default class FarrierGit extends View {
     cx.spawn(async (cx) => {
       try {
         await mustGit(root, on, ["pull", "--ff-only"], 180000);
-        if (this.context === ctx) this.setNote(behind > 0 ? "Pulled" : "Up to date", "success");
+        if (this.context === ctx) {
+          this.branches = null;
+          this.setNote(behind > 0 ? "Pulled" : "Up to date", "success");
+        }
       } catch (error) {
         if (this.context === ctx) this.setNote(String(error), "error");
       } finally {
@@ -1491,7 +1529,77 @@ export default class FarrierGit extends View {
     cx.notify();
   }
 
-  loadBranches(cx) {
+  toggleBranches(cx) {
+    this.branchesOpen = !this.branchesOpen;
+    if (this.branchesOpen && this.branches === null && !this.branchLoading) this.loadBranches(cx);
+    cx.notify();
+  }
+
+  refreshBranches(cx) {
+    if (!this.root || this.busy || this.branchLoading) return;
+    this.branches = null;
+    this.branchError = null;
+    this.loadBranches(cx);
+    cx.notify();
+  }
+
+  toggleBranchRow(branch, cx) {
+    if (this.branchExpanded.has(branch.name)) {
+      this.branchExpanded.delete(branch.name);
+      cx.notify();
+      return;
+    }
+    this.branchExpanded.clear();
+    this.branchExpanded.add(branch.name);
+    if (!this.branchCommits.has(branch.name)) this.loadBranchCommits(branch, cx);
+    cx.notify();
+  }
+
+  loadBranchCommits(branch, cx) {
+    if (!this.root || this.branchCommitsLoading.get(branch.name)) return;
+    const ctx = this.context;
+    const root = this.root;
+    const on = ctx.on;
+    const limit = Math.min(this.branchCommitLimit.get(branch.name) ?? BRANCH_COMMIT_PAGE, MAX_BRANCH_COMMITS);
+    this.branchCommitLimit.set(branch.name, limit);
+    this.branchCommitsLoading.set(branch.name, true);
+    this.branchCommitsError.delete(branch.name);
+    cx.spawn(async (cx) => {
+      try {
+        const result = await gitRun(root, on, [
+          "log",
+          `--max-count=${limit + 1}`,
+          `--format=${LOG_FORMAT}`,
+          "--no-color",
+          "--no-decorate",
+          `refs/heads/${branch.name}`,
+        ]);
+        if (result.code !== 0) throw new Error(gitError(result));
+        if (this.context !== ctx) return;
+        const all = parseLog(result.stdout);
+        this.branchCommits.set(branch.name, all.slice(0, limit));
+        this.branchCommitMore.set(branch.name, all.length > limit && limit < MAX_BRANCH_COMMITS);
+        this.branchCommitsError.delete(branch.name);
+      } catch (error) {
+        if (this.context === ctx) this.branchCommitsError.set(branch.name, String(error));
+      } finally {
+        if (this.context === ctx) this.branchCommitsLoading.set(branch.name, false);
+        cx.notify();
+      }
+    });
+  }
+
+  loadMoreBranchCommits(branch, cx) {
+    if (this.branchCommitsLoading.get(branch.name)) return;
+    const current = this.branchCommitLimit.get(branch.name) ?? BRANCH_COMMIT_PAGE;
+    if (current >= MAX_BRANCH_COMMITS) return;
+    const limit = Math.min(current + BRANCH_COMMIT_PAGE, MAX_BRANCH_COMMITS);
+    this.branchCommitLimit.set(branch.name, limit);
+    this.loadBranchCommits(branch, cx);
+    cx.notify();
+  }
+
+  loadBranches(cx, withRemote = this.mode === "branches") {
     if (this.mode === "diff" || this.branchLoading) return;
     if (!this.root) {
       this.branchError = "No repository";
@@ -1501,21 +1609,32 @@ export default class FarrierGit extends View {
     const root = this.root;
     const on = ctx.on;
     this.branchLoading = true;
+    this.branchError = null;
     cx.spawn(async (cx) => {
       try {
-        const [localResult, remoteResult] = await Promise.all([
-          gitRun(root, on, ["for-each-ref", `--format=${REF_FORMAT}`, "refs/heads"]),
-          gitRun(root, on, ["for-each-ref", `--format=${REMOTE_FORMAT}`, "refs/remotes"]),
-        ]);
+        const requests = [gitRun(root, on, ["for-each-ref", `--format=${REF_FORMAT}`, "refs/heads"])];
+        if (withRemote) {
+          requests.push(gitRun(root, on, ["for-each-ref", "--sort=-committerdate", "--count=250", `--format=${REMOTE_FORMAT}`, "refs/remotes"]));
+        }
+        const [localResult, remoteResult] = await Promise.all(requests);
         if (localResult.code !== 0) throw new Error(gitError(localResult));
         if (this.context !== ctx) return;
         const local = parseLocalRefs(localResult.stdout);
         local.sort((a, b) => Number(b.current) - Number(a.current) || b.at - a.at);
         this.branches = {
           local,
-          remote: remoteResult.code === 0 ? parseRemoteRefs(remoteResult.stdout).slice(0, 250) : [],
+          remote: remoteResult?.code === 0 ? parseRemoteRefs(remoteResult.stdout) : [],
         };
         this.branchError = null;
+        this.branchCommits.clear();
+        this.branchCommitMore.clear();
+        this.branchCommitsLoading.clear();
+        this.branchCommitsError.clear();
+        for (const name of this.branchExpanded) {
+          const item = local.find((branch) => branch.name === name);
+          if (item) this.loadBranchCommits(item, cx);
+          else this.branchExpanded.delete(name);
+        }
       } catch (error) {
         if (this.context === ctx) this.branchError = String(error);
       } finally {
@@ -1591,6 +1710,7 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.mode = "changes";
           this.branchAction = null;
+          this.branches = null;
           this.setNote(`Merged ${branch.name}`, "success");
         }
       } catch (error) {
@@ -1619,6 +1739,7 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.mode = "changes";
           this.branchAction = null;
+          this.branches = null;
           this.setNote(`Rebased onto ${branch.name}`, "success");
         }
       } catch (error) {
@@ -2218,9 +2339,174 @@ export default class FarrierGit extends View {
             .flex_1()
             .min_h(0)
             .child(this.renderCommit(t, cx))
-            .child(this.renderFiles(t, cx)),
+            .child(this.renderFiles(t, cx))
+            .child(this.renderBranchesSection(t, cx)),
         ),
       );
+  }
+
+  renderBranchesSection(t, cx) {
+    const busy = this.loading || this.busy || this.generating;
+    const local = this.branches?.local ?? [];
+    const count = this.branches ? local.length : null;
+    const visible = local.slice(0, MAX_BRANCH_ROWS);
+    const expanded = visible.some((branch) => this.branchExpanded.has(branch.name));
+    const truncated = local.length > visible.length;
+    const listHeight = expanded ? 320 : Math.min(280, Math.max(52, visible.length * 48 + 10 + (truncated ? 26 : 0)));
+    return v_flex()
+      .id("farrier-git-branches-section")
+      .flex_none()
+      .bg(t.chrome)
+      .border_t(1)
+      .border_color(t.border)
+      .child(
+        h_flex()
+          .id("farrier-git-branches-toggle")
+          .h(30)
+          .flex_none()
+          .px(9)
+          .gap(6)
+          .items_center()
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_event, cx) => this.toggleBranches(cx))
+          .child(icon(this.branchesOpen ? "chevron-down" : "chevron-right", t.dim, 12))
+          .child(icon("branch", t.accent, 13))
+          .child(div().flex_none().text_size(11.5).font_semibold().child("Branches"))
+          .when(this.branchesOpen && count !== null, (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(`(${count})`)))
+          .child(div().flex_1())
+          .when(this.branchesOpen && this.branchLoading, (el) => el.child(svg(ICON("spinner")).size(12).flex_none().text_color(t.muted).spin(800)))
+          .when(this.branchesOpen && !this.branchLoading, (el) =>
+            el.child(iconButton(t, "farrier-git-branches-refresh", "refresh", "Reload branches", (cx) => this.refreshBranches(cx), { disabled: busy, size: 24, glyphSize: 12, stopDrag: true })),
+          ),
+      )
+      .when(this.branchesOpen, (el) =>
+        el.child(
+          v_flex()
+            .id("farrier-git-branches-drawer")
+            .flex_none()
+            .h(listHeight)
+            .min_h(0)
+            .overflow_y_scrollbar()
+            .p(5)
+            .gap(1)
+            .when(this.branches === null && this.branchLoading, (e) => e.child(div().p(8).text_size(11).text_color(t.dim).child("Loading branches")))
+            .when(this.branches === null && !this.branchLoading, (e) => e.child(div().p(8).text_size(11).text_color(this.branchError ? t.blocked : t.dim).child(this.branchError || "No branches")))
+            .when(this.branches !== null && !local.length, (e) => e.child(div().p(8).text_size(11).text_color(t.dim).child("No local branches")))
+            .when(this.branches !== null && Boolean(this.branchError), (e) => e.child(div().p(8).text_size(11).text_color(t.blocked).child(this.branchError)))
+            .children(visible.map((branch) => this.branchSectionRow(t, branch, cx)))
+            .when(truncated, (e) => e.child(div().h(26).pl(42).pr(7).flex().items_center().text_size(10).text_color(t.dim).child(`Showing the first ${visible.length} of ${local.length} branches`))),
+        ),
+      );
+  }
+
+  branchSectionRow(t, branch, cx) {
+    const current = Boolean(branch.current);
+    const expanded = this.branchExpanded.has(branch.name);
+    return v_flex()
+      .id(`farrier-git-branch-row-${branch.name}`)
+      .flex_none()
+      .rounded(7)
+      .when(current && !expanded, (el) => el.bg(t.selected))
+      .child(
+        h_flex()
+          .id(`farrier-git-branch-toggle-${branch.name}`)
+          .h(32)
+          .flex_none()
+          .px(7)
+          .gap(6)
+          .items_center()
+          .rounded(7)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_event, cx) => this.toggleBranchRow(branch, cx))
+          .when(current && expanded, (el) => el.bg(t.selected))
+          .when(!current && expanded, (el) => el.bg(t.raised))
+          .child(icon(expanded ? "chevron-down" : "chevron-right", t.dim, 11))
+          .child(icon("branch", current ? t.accent : t.muted, 12))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.foreground).child(branch.name))
+          .when(branch.at > 0, (el) => el.child(div().flex_none().text_size(9.5).text_color(t.dim).child(ago(branch.at))))
+          .when(current, (el) => el.child(icon("check", t.accent, 12))),
+      )
+      .when(!expanded, (el) =>
+        el.child(
+          h_flex()
+            .h(16)
+            .pl(42)
+            .pr(7)
+            .items_center()
+            .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(branch.subject || "No commit")),
+        ),
+      )
+      .when(expanded, (el) => el.child(this.renderBranchCommits(t, branch, cx)));
+  }
+
+  renderBranchCommits(t, branch, cx) {
+    const commits = this.branchCommits.get(branch.name);
+    const loading = Boolean(this.branchCommitsLoading.get(branch.name));
+    const more = Boolean(this.branchCommitMore.get(branch.name));
+    const error = this.branchCommitsError.get(branch.name);
+    return v_flex()
+      .id(`farrier-git-branch-commits-${branch.name}`)
+      .flex_none()
+      .gap(1)
+      .when(loading && !commits, (el) => el.child(this.branchCommitStatus(t, "Loading commits", false)))
+      .when(Boolean(error) && !commits, (el) => el.child(this.branchCommitStatus(t, error, true)))
+      .when(Boolean(commits) && !commits.length, (el) => el.child(this.branchCommitStatus(t, "No commits", false)))
+      .when(Boolean(commits), (el) => el.children(commits.map((commit) => this.branchCommitRow(t, branch, commit))))
+      .when(loading && Boolean(commits), (el) => el.child(this.branchCommitStatus(t, "Loading commits", false)))
+      .when(more && !loading, (el) =>
+        el.child(
+          h_flex()
+            .id(`farrier-git-branch-more-${branch.name}`)
+            .h(26)
+            .flex_none()
+            .pl(42)
+            .pr(7)
+            .gap(5)
+            .items_center()
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover))
+            .on_click((_event, cx) => this.loadMoreBranchCommits(branch, cx))
+            .child(icon("chevron-down", t.dim, 10))
+            .child(div().text_size(10).text_color(t.accent).child("Load more")),
+        ),
+      );
+  }
+
+  branchCommitStatus(t, text, error) {
+    return h_flex()
+      .h(26)
+      .flex_none()
+      .pl(42)
+      .pr(7)
+      .items_center()
+      .child(div().text_size(10).text_color(error ? t.blocked : t.dim).child(text));
+  }
+
+  branchCommitRow(t, branch, commit) {
+    const merged = /^Merge\b/i.test(commit.subject);
+    const copied = this.copiedSha === commit.hash;
+    return h_flex()
+      .id(`farrier-git-commit-${branch.name}-${commit.hash}`)
+      .h(26)
+      .flex_none()
+      .pl(42)
+      .pr(7)
+      .gap(5)
+      .items_center()
+      .hover((s) => s.bg(t.hover))
+      .tooltip(copied ? "SHA copied" : "Right-click to copy SHA")
+      .on_mouse_down("right", (_event, cx) => {
+        cx.stop_propagation();
+        cx.write_to_clipboard(commit.hash);
+        this.copiedSha = commit.hash;
+        cx.notify();
+      })
+      .child(icon(copied ? "check" : merged ? "merge" : "commit", copied ? t.done : merged ? t.ansi3 : t.dim, 10))
+      .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.muted).child(commit.subject || "(no message)"))
+      .when(Boolean(commit.author), (el) => el.child(div().flex_none().max_w(52).truncate().text_size(9).text_color(t.dim).child(commit.author)))
+      .when(commit.at > 0, (el) => el.child(div().flex_none().text_size(9).text_color(t.dim).child(ago(commit.at))));
   }
 
   renderEmpty(t, cx) {
