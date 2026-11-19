@@ -5,6 +5,23 @@ the focused pane's folder: staged and unstaged files, branches, stashes, a diff
 window, and a commit box above the file list. The ellipsis beside the title
 opens push, pull, fetch, branches and stashes.
 
+## Install alone
+
+`farrier-git` is its own catalogue row. Run `--list`, then
+`powershell -ExecutionPolicy Bypass -File install.ps1 farrier-git` or
+`sh install.sh farrier-git` to install the panel without the layout or the
+theme. It uses theme colors only, so it follows the theme you already use. In
+a personal layout, add a block where it should show:
+
+```json
+{ "id": "farrier-git", "type": "block", "content": { "mod": "farrier-git" } }
+```
+
+Clone a Herdr layout first: shipped layouts are restored on start. In the
+farrier layout it sits in the Changes stack, opened by the tab bar's
+**Changes** button; in another layout, open the block directly or point that
+stack's `changes` child at `farrier-git`.
+
 ## What it does
 
 - **Files**: staged changes and working changes are separate groups. A row

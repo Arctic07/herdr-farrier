@@ -1,7 +1,7 @@
 {
   "id": "root",
   "type": "row",
-  "theme": "farrier",
+  "theme": "farrier-charcoal",
   "ui_font": "HarmonyOS Sans SC",
   "preview": "layouts/farrier.svg",
   "background": "canvas",

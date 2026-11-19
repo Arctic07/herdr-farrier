@@ -56,13 +56,30 @@ function location() {
 
 const contextKey = () => JSON.stringify(location());
 
-function findNode(node, id) {
-  if (node?.id === id) return node;
-  for (const child of node?.children ?? []) {
-    const found = findNode(child, id);
-    if (found) return found;
+function findModPaths(node, mod, path = [], out = []) {
+  if (!node) return out;
+  const here = [...path, node];
+  if (node.content?.mod === mod) out.push(here);
+  for (const child of node.children ?? []) findModPaths(child, mod, here, out);
+  return out;
+}
+
+function shownStackChild(node) {
+  const visible = (node.children ?? []).filter((child) => !child.hidden);
+  return visible.find((child) => child.id === node.active) ?? visible[0] ?? null;
+}
+
+function pathShown(path) {
+  for (let i = 0; i < path.length; i++) {
+    const node = path[i];
+    const child = path[i + 1];
+    if (node.hidden) return false;
+    if (node.type === "stack" && child) {
+      const shown = shownStackChild(node);
+      if (!shown || shown.id !== child.id) return false;
+    }
   }
-  return null;
+  return true;
 }
 
 // ---- git --------------------------------------------------------------------
@@ -591,11 +608,10 @@ export default class FarrierGit extends View {
     const p = props() ?? {};
     if (p.mode) return true;
     try {
-      const root = layout();
-      const panel = findNode(root, "panel");
-      const body = findNode(root, "panel-body");
-      if (!panel || !body) return true;
-      return !panel.hidden && body.active === "changes";
+      const paths = findModPaths(layout(), "farrier-git");
+      if (!paths.length) return true;
+      if (paths.some(pathShown)) return true;
+      return panes().some((pane) => pane.mod === "farrier-git");
     } catch {
       return true;
     }

@@ -1,7 +1,7 @@
 # id	kind	src	dest	description
 # Themes go before layouts: a layout that is on screen is re-applied the moment
 # its file changes, and it needs its theme to already be there.
-farrier-theme	theme	themes/farrier.json	themes/farrier.json	Farrier's charcoal and cyan theme, offered only in this layout
+farrier-theme	theme	themes/farrier-charcoal.json	themes/farrier-charcoal.json	Farrier's charcoal and cyan theme, offered in every layout
 farrier-layout	layout	layouts/farrier.json	layouts/farrier.json	The Farrier layout
 farrier-preview	file	layouts/farrier.svg	layouts/farrier.svg	Picture shown for the layout in Settings
 farrier-mod	mod	mods/farrier	mods/farrier	Bottom strip: machine, space, branch, how many agents wait

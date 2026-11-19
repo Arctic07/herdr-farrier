@@ -25,6 +25,24 @@ for (const line of readFileSync(join(root, "reserved.txt"), "utf8").split(/\r?\n
   reserved.set(`${kind}:${name}`, true);
 }
 
+// A theme named like a layout is that layout's own in Herdr: Settings offers it
+// only there. Our themes stay selectable in every layout, so their names differ.
+const themeNames = rows.filter((row) => row.kind === "theme" && row.dest).map((row) => basename(row.dest, ".json"));
+const layoutNames = [
+  ...rows.filter((row) => row.kind === "layout" && row.dest).map((row) => basename(row.dest, ".json")),
+  ...[...reserved.keys()].filter((key) => key.startsWith("layout:")).map((key) => key.slice("layout:".length)),
+];
+let layoutRow = false;
+for (const row of rows) {
+  if (row.kind === "theme" && layoutRow) bad("install.tsv: a theme row comes after a layout row; a layout can re-apply before its theme");
+  if (row.kind === "layout") layoutRow = true;
+}
+const themePresets = new Set([
+  "graphite", "ink", "moss", "paper",
+  ...[...reserved.keys()].filter((key) => key.startsWith("theme:")).map((key) => key.slice("theme:".length)),
+]);
+const availableThemes = new Set([...themeNames, ...themePresets]);
+
 const version = readFileSync(join(root, "VERSION"), "utf8").trim();
 if (!/^\d+\.\d+\.\d+$/.test(version)) bad(`VERSION is not x.y.z: ${version}`);
 
@@ -45,8 +63,9 @@ for (const row of rows) {
   if (!places[row.kind]?.includes(dirname(row.dest) + "/")) {
     bad(`install.tsv: ${row.id} goes to ${row.dest}, wrong for a ${row.kind}`);
   }
-  if (row.kind !== "file" && reserved.has(`${row.kind}:${basename(row.dest)}`)) {
-    bad(`install.tsv: '${basename(row.dest)}' is a name Herdr ships (reserved.txt)`);
+  const reservedName = row.kind === "layout" || row.kind === "theme" ? basename(row.dest, ".json") : basename(row.dest);
+  if (row.kind !== "file" && reserved.has(`${row.kind}:${reservedName}`)) {
+    bad(`install.tsv: '${reservedName}' is a name Herdr ships (reserved.txt)`);
   }
 
   const source = join(root, row.src);
@@ -83,7 +102,15 @@ for (const row of rows) {
     if (!layout) continue;
     if (!layout.id || !layout.type) bad(`${row.src} needs a root id and type`);
     if (layout.preview && !existsSync(join(root, layout.preview))) bad(`${row.src}: preview '${layout.preview}' is missing`);
+    const used = typeof layout.theme === "string" ? [layout.theme] : layout.theme && typeof layout.theme === "object" ? Object.values(layout.theme) : [];
+    for (const name of used) {
+      if (typeof name === "string" && !availableThemes.has(name)) bad(`${row.src}: theme '${name}' is not in install.tsv or a Herdr preset`);
+    }
   }
+}
+
+for (const name of themeNames) {
+  if (layoutNames.includes(name)) bad(`install.tsv: theme '${name}' has a layout's name; Herdr would offer it only in that layout`);
 }
 
 // A layout may reference its own mods or the ones Herdr ships, nothing else.

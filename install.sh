@@ -20,6 +20,10 @@ here=$(cd "$(dirname "$0")" && pwd -P)
 TSV=$here/install.tsv
 RESERVED=$here/reserved.txt
 APP=${HERDR_APP_HOME:-$HOME/.config/herdr-app}
+legacy_theme=themes/farrier.json
+theme_id=farrier-theme
+layout_id=farrier-layout
+mod_id=farrier-mod
 VERSION=$(cat "$here/VERSION")
 echo "Farrier $VERSION"
 
@@ -53,6 +57,7 @@ fail() {
 field() { awk -F'\t' -v id="$1" -v n="$2" '$1 == id { print $n }' "$TSV"; }
 ids() { awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$TSV"; }
 reserved() { awk -F'\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print "yes" }' "$RESERVED"; }
+has_id() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
 
 has_python() { command -v python3 >/dev/null 2>&1; }
 
@@ -101,6 +106,11 @@ PY
 }
 
 # ---- validate, before anything is written -----------------------------------
+# A theme named like a layout is that layout's own in Herdr: Settings offers it
+# only there. Farrier's themes stay selectable in every layout.
+own_layouts=$(awk -F'\t' '!/^#/ && $2 == "layout" { n = $4; sub(/.*\//, "", n); sub(/\.json$/, "", n); print n }' "$TSV" | tr -d '\r')
+builtin_layouts=$(awk -F'\t' '$1 == "layout" { print $2 }' "$RESERVED" | tr -d '\r')
+
 seen=""
 for id in $(ids); do
   kind=$(field "$id" 2)
@@ -120,8 +130,16 @@ for id in $(ids); do
     mod) [ "$place" = "mods" ] || fail "install.tsv: $dest is not under mods/ for a mod" ;;
     file) { [ "$place" = "layouts" ] || [ "$place" = "themes" ]; } || fail "install.tsv: $dest is not under layouts/ or themes/" ;;
   esac
-  if [ "$kind" != "file" ] && [ -n "$(reserved "$kind" "$name")" ]; then
-    fail "install.tsv: '$name' is a name Herdr ships; pick another one (reserved.txt)"
+  reserved_name=$name
+  case $kind in layout|theme) reserved_name=${name%.json} ;; esac
+  if [ "$kind" != "file" ] && [ -n "$(reserved "$kind" "$reserved_name")" ]; then
+    fail "install.tsv: '$reserved_name' is a name Herdr ships; pick another one (reserved.txt)"
+  fi
+  if [ "$kind" = "theme" ]; then
+    theme_name=${name%.json}
+    if printf '%s\n%s\n' "$own_layouts" "$builtin_layouts" | grep -Fxq "$theme_name"; then
+      fail "install.tsv: theme '$theme_name' has a layout's name; Herdr would offer it only in that layout"
+    fi
   fi
 
   if [ ! -e "$here/$src" ]; then
@@ -176,13 +194,17 @@ if [ -n "$selected" ]; then
     chosen="$chosen $id"
   done
 else
-  chosen=$(ids)
+  chosen=$(ids | tr '\n' ' ')
 fi
 
 if [ "$update" = 1 ] && [ "$remove" = 0 ]; then
+  # An older install kept the theme under the layout's name. Treat it as
+  # installed so --update brings the renamed theme in and then removes it.
   keep=""
   for id in $chosen; do
     if [ -e "$APP/$(field "$id" 4)" ]; then
+      keep="$keep $id"
+    elif [ "$id" = "$theme_id" ] && [ -e "$APP/$legacy_theme" ]; then
       keep="$keep $id"
     fi
   done
@@ -308,7 +330,21 @@ if [ "$remove" = 1 ]; then
     echo "  - $(field "$id" 4)"
     removed=$((removed + 1))
   done
-  if [ "$want_keys" = 1 ] || [ "$removed" -gt 0 ]; then
+  remove_legacy=0
+  [ -z "$selected" ] && remove_legacy=1
+  case " $selected " in *" $theme_id "*) remove_legacy=1 ;; esac
+  if [ "$remove_legacy" = 1 ] && [ -e "$APP/$legacy_theme" ]; then
+    [ "$dry" = 1 ] || rm -f "$APP/$legacy_theme"
+    echo "  - $legacy_theme  (old theme name)"
+    removed=$((removed + 1))
+  fi
+  remove_keys_here=0
+  if [ -z "$selected" ]; then
+    remove_keys_here=1
+  elif has_id "$chosen" "$layout_id" || has_id "$chosen" "$mod_id"; then
+    remove_keys_here=1
+  fi
+  if [ "$remove_keys_here" = 1 ] && { [ "$want_keys" = 1 ] || [ "$removed" -gt 0 ]; }; then
     remove_keys
   fi
   if [ "$dry" = 0 ]; then
@@ -319,6 +355,20 @@ if [ "$remove" = 1 ]; then
 fi
 
 # ---- install ------------------------------------------------------------------
+layout_installed=0
+[ -e "$APP/layouts/farrier.json" ] && layout_installed=1
+# An old install left the theme under the layout's name. Update the layout and
+# bring the new theme with it; a theme-only update keeps the old file while the
+# installed layout still names it.
+if has_id "$chosen" "$layout_id" && [ -e "$APP/$legacy_theme" ] && ! has_id "$chosen" "$theme_id"; then
+  chosen="$chosen $theme_id"
+fi
+order=""
+for id in $(ids); do
+  if has_id "$chosen" "$id"; then order="$order $id"; fi
+done
+chosen=$order
+
 if [ "$dry" = 0 ]; then
   rm -rf "$stage"
   mkdir -p "$stage"
@@ -367,6 +417,22 @@ for id in $chosen; do
   echo "  + $(field "$id" 4)"
 done
 
+if has_id "$chosen" "$theme_id" && [ -e "$APP/$legacy_theme" ]; then
+  if has_id "$chosen" "$layout_id" || [ "$layout_installed" = 0 ]; then
+    changed=$((changed + 1))
+    if [ "$dry" = 1 ]; then
+      echo "  - $legacy_theme  (old theme name)"
+    else
+      mkdir -p "$(dirname "$backup/$legacy_theme")"
+      cp "$APP/$legacy_theme" "$backup/$legacy_theme"
+      rm -f "$APP/$legacy_theme"
+      echo "  - $legacy_theme  (old theme name)"
+    fi
+  else
+    echo "  ! $legacy_theme kept: the installed layout still names it"
+  fi
+fi
+
 if [ "$dry" = 0 ]; then
   rm -rf "$stage"
 fi
@@ -381,7 +447,7 @@ if [ "$dry" = 0 ]; then
   done
 fi
 
-if [ "$want_keys" = 1 ]; then
+if [ "$want_keys" = 1 ] && has_id "$chosen" "$layout_id" && has_id "$chosen" "$mod_id"; then
   merge_keys
 fi
 
@@ -389,10 +455,10 @@ if [ "$dry" = 0 ]; then
   echo ""
   if [ "$changed" = 0 ]; then
     echo "Everything was already up to date."
-  else
+  elif has_id "$chosen" "$layout_id"; then
     echo "Next: open Herdr and pick farrier in Settings > Layout (Ctrl+Shift+L cycles layouts)."
   fi
-  if [ "$want_keys" = 0 ]; then
+  if [ "$want_keys" = 0 ] && has_id "$chosen" "$layout_id" && has_id "$chosen" "$mod_id"; then
     echo "      Add this layout's key with: sh install.sh --keys"
   fi
   if [ -d "$backup" ]; then

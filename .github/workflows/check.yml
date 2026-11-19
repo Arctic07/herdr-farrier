@@ -25,3 +25,6 @@ jobs:
 
       - name: Installer behaviour
         run: sh tests/install.test.sh
+
+      - name: Installer behaviour (PowerShell)
+        run: pwsh -NoProfile -File tests/install.test.ps1

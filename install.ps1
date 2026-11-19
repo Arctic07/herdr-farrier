@@ -54,12 +54,22 @@ foreach ($line in Get-Content -LiteralPath (Join-Path $Root "install.tsv") -Enco
   }
 }
 
+$LegacyTheme = "themes/farrier.json"
+$ThemeId = "farrier-theme"
+$LayoutId = "farrier-layout"
+$ModId = "farrier-mod"
+
 $Reserved = @{}
 foreach ($line in Get-Content -LiteralPath (Join-Path $Root "reserved.txt") -Encoding UTF8) {
   if (-not $line.Trim() -or $line.StartsWith("#")) { continue }
   $parts = $line -split "`t"
   if ($parts.Count -ge 2) { $Reserved[($parts[0] + ":" + $parts[1])] = $true }
 }
+
+# A theme named like a layout is that layout's own in Herdr: Settings offers it
+# only there. Farrier's themes stay selectable in every layout.
+$LayoutNames = @($Rows | Where-Object { $_.Kind -eq "layout" } | ForEach-Object { [System.IO.Path]::GetFileNameWithoutExtension([System.IO.Path]::GetFileName($_.Dest.TrimEnd("/"))) })
+foreach ($key in $Reserved.Keys) { if ($key.StartsWith("layout:")) { $LayoutNames += $key.Substring("layout:".Length) } }
 
 # ---- validation, before anything is written ---------------------------------
 $seen = @{}
@@ -76,8 +86,16 @@ foreach ($row in $Rows) {
   if ($row.Kind -eq "theme") { $expected = @("themes/") }
   if ($row.Kind -eq "mod") { $expected = @("mods/") }
   if ($expected -notcontains $place) { & $Fail "install.tsv: $($row.Id) goes to $($row.Dest), which is the wrong place for a $($row.Kind)" }
-  if ($row.Kind -ne "file" -and $Reserved.ContainsKey($row.Kind + ":" + $name)) {
-    & $Fail "install.tsv: '$name' is a name Herdr ships; pick another one (reserved.txt)"
+  $reservedName = $name
+  if ($row.Kind -eq "layout" -or $row.Kind -eq "theme") { $reservedName = [System.IO.Path]::GetFileNameWithoutExtension($name) }
+  if ($row.Kind -ne "file" -and $Reserved.ContainsKey($row.Kind + ":" + $reservedName)) {
+    & $Fail "install.tsv: '$reservedName' is a name Herdr ships; pick another one (reserved.txt)"
+  }
+  if ($row.Kind -eq "theme") {
+    $themeName = [System.IO.Path]::GetFileNameWithoutExtension($name)
+    if ($LayoutNames -contains $themeName) {
+      & $Fail "install.tsv: theme '$themeName' has a layout's name; Herdr would offer it only in that layout"
+    }
   }
 
   $source = Join-Path $Root $row.Src
@@ -156,7 +174,12 @@ if (-not $Herdr) { & $Fail "herdr-app is not on PATH and not in $env:LOCALAPPDAT
 if (-not (Test-Path -LiteralPath $AppHome -PathType Container)) { & $Fail "No Herdr home at $AppHome. Open Herdr once, or set HERDR_APP_HOME to its folder." }
 
 if ($Update -and -not $Remove) {
-  $Chosen = @($Chosen | Where-Object { Test-Path -LiteralPath (Join-Path $AppHome $_.Dest) })
+  # An older install kept the theme under the layout's name. Treat it as
+  # installed so --update brings the renamed theme in and then removes it.
+  $Chosen = @($Chosen | Where-Object {
+    (Test-Path -LiteralPath (Join-Path $AppHome $_.Dest)) -or
+    ($_.Id -eq $ThemeId -and (Test-Path -LiteralPath (Join-Path $AppHome $LegacyTheme)))
+  })
   if ($Chosen.Count -eq 0) { & $Fail "Nothing from Farrier is installed yet: run install.ps1 to pick." }
 }
 
@@ -205,7 +228,7 @@ function Add-PackKeys {
   if (-not $changed) { Write-Host "  = keys already bound"; return }
   if ($DryRun) { Write-Host "  (dry run: keys.json not written)"; return }
   New-Item -ItemType Directory -Path $Backup -Force | Out-Null
-  Copy-Item -LiteralPath $keysPath -Destination (Join-Path $Backup "keys.json") -Force
+  if (Test-Path -LiteralPath $keysPath) { Copy-Item -LiteralPath $keysPath -Destination (Join-Path $Backup "keys.json") -Force }
   $json = $keys | ConvertTo-Json -Depth 10
   [System.IO.File]::WriteAllText($keysPath, ($json + "`n"), (New-Object System.Text.UTF8Encoding($false)))
   Write-Host ("  ~ keys.json (the old one is in " + $Backup + ")")
@@ -234,7 +257,7 @@ function Remove-PackKeys {
   if (-not $changed) { Write-Host "  = no key of ours left"; return }
   if ($DryRun) { Write-Host "  (dry run: keys.json not written)"; return }
   New-Item -ItemType Directory -Path $Backup -Force | Out-Null
-  Copy-Item -LiteralPath $keysPath -Destination (Join-Path $Backup "keys.json") -Force
+  if (Test-Path -LiteralPath $keysPath) { Copy-Item -LiteralPath $keysPath -Destination (Join-Path $Backup "keys.json") -Force }
   $json = $keys | ConvertTo-Json -Depth 10
   [System.IO.File]::WriteAllText($keysPath, ($json + "`n"), (New-Object System.Text.UTF8Encoding($false)))
   Write-Host ("  ~ keys.json (the old one is in " + $Backup + ")")
@@ -253,12 +276,32 @@ if ($Remove) {
     Write-Host ("  - " + $row.Dest)
     $removed++
   }
-  if ($WantKeys -or ($removed -gt 0)) { Remove-PackKeys }
+  $legacy = Join-Path $AppHome $LegacyTheme
+  if (($Select.Count -eq 0 -or $Select -contains $ThemeId) -and (Test-Path -LiteralPath $legacy)) {
+    if (-not $DryRun) { Remove-Item -LiteralPath $legacy -Force }
+    Write-Host ("  - " + $LegacyTheme + "  (old theme name)")
+    $removed++
+  }
+  $KeyParts = @("farrier-layout", "farrier-mod")
+  $RemoveKeysHere = ($Select.Count -eq 0) -or (@($Chosen | Where-Object { $KeyParts -contains $_.Id }).Count -gt 0)
+  if ($RemoveKeysHere -and ($WantKeys -or ($removed -gt 0))) { Remove-PackKeys }
   if (-not $DryRun) {
     Write-Host ""
     Write-Host "Removed $removed of $($Chosen.Count). Switch to another layout first if Farrier is the shown one."
   }
   exit 0
+}
+
+$LayoutInstalled = Test-Path -LiteralPath (Join-Path $AppHome "layouts/farrier.json")
+# An old install left the theme under the layout's name. Update the layout and
+# bring the new theme with it; a theme-only update keeps the old file while the
+# installed layout still names it.
+if ((@($Chosen | Where-Object { $_.Id -eq $LayoutId }).Count -gt 0) -and -not (@($Chosen | Where-Object { $_.Id -eq $ThemeId }).Count -gt 0) -and (Test-Path -LiteralPath (Join-Path $AppHome $LegacyTheme))) {
+  $ids = @($Chosen | ForEach-Object { $_.Id }) + $ThemeId
+  $Chosen = @($Rows | Where-Object { $ids -contains $_.Id })
+} else {
+  $ids = @($Chosen | ForEach-Object { $_.Id })
+  $Chosen = @($Rows | Where-Object { $ids -contains $_.Id })
 }
 
 if (-not $DryRun) {
@@ -299,6 +342,25 @@ foreach ($row in $Chosen) {
   if ($there) { Write-Host ("  ~ " + $row.Dest) } else { Write-Host ("  + " + $row.Dest) }
 }
 
+$legacy = Join-Path $AppHome $LegacyTheme
+$ThemeChosen = @($Chosen | Where-Object { $_.Id -eq $ThemeId }).Count -gt 0
+$LayoutChosen = @($Chosen | Where-Object { $_.Id -eq $LayoutId }).Count -gt 0
+if ($ThemeChosen -and (Test-Path -LiteralPath $legacy)) {
+  if ($LayoutChosen -or -not $LayoutInstalled) {
+    $changed++
+    if ($DryRun) {
+      Write-Host ("  - " + $LegacyTheme + "  (old theme name)")
+    } else {
+      New-Item -ItemType Directory -Path (Join-Path $Backup "themes") -Force | Out-Null
+      Copy-Item -LiteralPath $legacy -Destination (Join-Path $Backup $LegacyTheme) -Force
+      Remove-Item -LiteralPath $legacy -Force
+      Write-Host ("  - " + $LegacyTheme + "  (old theme name)")
+    }
+  } else {
+    Write-Host ("  ! " + $LegacyTheme + " kept: the installed layout still names it")
+  }
+}
+
 if (-not $DryRun -and (Test-Path -LiteralPath $Stage)) { Remove-Item -LiteralPath $Stage -Recurse -Force }
 
 $failed = @()
@@ -310,13 +372,20 @@ if (-not $DryRun) {
   }
 }
 
-if ($WantKeys) { Add-PackKeys }
+if ($WantKeys -and (@($Chosen | Where-Object { $_.Id -eq $LayoutId }).Count -gt 0) -and (@($Chosen | Where-Object { $_.Id -eq $ModId }).Count -gt 0)) {
+  Add-PackKeys
+}
 
 if (-not $DryRun) {
   Write-Host ""
-  if ($changed -eq 0) { Write-Host "Everything was already up to date." }
-  else { Write-Host "Next: open Herdr and pick farrier in Settings > Layout (Ctrl+Shift+L cycles layouts)." }
-  if (-not $WantKeys) { Write-Host "      Add this layout's key with: install.ps1 --keys" }
+  if ($changed -eq 0) {
+    Write-Host "Everything was already up to date."
+  } elseif (@($Chosen | Where-Object { $_.Id -eq $LayoutId }).Count -gt 0) {
+    Write-Host "Next: open Herdr and pick farrier in Settings > Layout (Ctrl+Shift+L cycles layouts)."
+  }
+  if (-not $WantKeys -and (@($Chosen | Where-Object { $_.Id -eq $LayoutId }).Count -gt 0) -and (@($Chosen | Where-Object { $_.Id -eq $ModId }).Count -gt 0)) {
+    Write-Host "      Add this layout's key with: install.ps1 --keys"
+  }
   if (Test-Path -LiteralPath $Backup) { Write-Host "Replaced files are in $Backup" }
 }
 

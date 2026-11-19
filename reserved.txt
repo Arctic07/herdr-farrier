@@ -27,4 +27,8 @@ layout	main
 layout	terminals
 layout	win98
 theme	atom-one-dark
+theme	graphite
+theme	ink
+theme	moss
+theme	paper
 theme	win98
