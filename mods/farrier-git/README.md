@@ -30,6 +30,16 @@ stack's `changes` child at `farrier-git`.
   confirmation; untracked files are deleted then. Clicking a file opens its diff
   in a window. Large change sets get a filter above the list; each group shows
   100 rows and adds 100 at a time up to 300.
+- **Conflicts**: conflicts appear in a red card above Changes with **Use current
+  for all** and **Use incoming for all**. A conflict row has a resolve action
+  for one file; its check marks the file resolved. Stage all, discard all, and
+  Commit stay disabled while conflicts remain; Commit is also disabled during a
+  rebase, cherry-pick, or revert, where **Continue** finishes the operation.
+  During a rebase the current and incoming sides swap, and choosing a side that
+  deleted the file removes it.
+- **Errors**: action errors are stripped of ANSI control codes and shown as a
+  dismissible red card; they disappear after nine seconds. Success notes clear
+  after four.
 - **Branches**: the branch chip opens the branch list; the ellipsis menu adds
   merge, rebase, create, create from a source, rename, delete, delete a remote
   branch, publish, and the full list. Remote branches check out as tracking

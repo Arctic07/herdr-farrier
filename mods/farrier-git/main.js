@@ -92,15 +92,69 @@ async function gitRun(cwd, on, args, timeout) {
   return exec("git", [...READ, ...args], { cwd, on, ...(timeout === undefined ? {} : { timeout }) });
 }
 
+function cleanAnsi(text) {
+  return String(text)
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\[\d{1,2}(?:;\d{1,2})*m/g, "")
+    .replace(/\r/g, "");
+}
+
+function cleanNote(text) {
+  return cleanAnsi(text)
+    .replace(/^Error:\s*/, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 1200);
+}
+
 function gitError(result) {
-  const text = (result.stderr || result.stdout || "").trim();
-  return text.split(/\r?\n/).slice(0, 5).join("\n") || `git exited with ${result.code}`;
+  const text = cleanAnsi(result.stderr || result.stdout || "").trim();
+  const lines = text.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line.trim());
+  const indexes = [];
+  for (let index = 0; index < lines.length; index++) {
+    const body = lines[index].trim();
+    if (/^(error|fatal|hint|warning|remote:|! |CONFLICT|Auto-merging)|\b(rejected|failed|conflict|not found|no such)\b/i.test(body)) {
+      indexes.push(index);
+      if (body.endsWith(":")) {
+        for (let next = index + 1; next < lines.length && /^\s/.test(lines[next]) && indexes.length < 6; next++) indexes.push(next);
+      }
+    }
+  }
+  let chosen;
+  if (indexes.length) {
+    const unique = [...new Set(indexes)].sort((a, b) => a - b);
+    chosen = unique.slice(0, 6).map((index) => lines[index].trim());
+  } else {
+    chosen = [...new Set([...lines.slice(0, 3), ...lines.slice(-3)])].slice(0, 6);
+  }
+  return chosen.join("\n") || `git exited with ${result.code}`;
 }
 
 async function mustGit(cwd, on, args, timeout) {
   const result = await gitRun(cwd, on, args, timeout);
   if (result.code !== 0) throw new Error(gitError(result));
   return result;
+}
+
+async function conflictOperation(cwd, on) {
+  for (const [ref, name] of [["REBASE_HEAD", "rebase"], ["MERGE_HEAD", "merge"], ["CHERRY_PICK_HEAD", "cherry-pick"], ["REVERT_HEAD", "revert"]]) {
+    const result = await gitRun(cwd, on, ["rev-parse", "--verify", "--quiet", ref]);
+    if (result.code === 0) return name;
+  }
+  return "";
+}
+
+async function conflictStages(cwd, on, path) {
+  const result = await gitRun(cwd, on, ["ls-files", "-u", "--", path]);
+  if (result.code !== 0) return null;
+  const stages = new Set();
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const tab = line.indexOf("\t");
+    const meta = (tab < 0 ? line : line.slice(0, tab)).split(" ");
+    if (meta[2]) stages.add(meta[2]);
+  }
+  return stages;
 }
 
 // Porcelain v2 with --no-renames: one record per path, plus branch headers.
@@ -139,7 +193,8 @@ function parseStatus(text) {
     if (type === "u") {
       const parts = record.split(" ");
       const path = parts.slice(10).join(" ");
-      if (path) files.push({ path, xy: parts[1] ?? "UU", untracked: false, conflict: true });
+      const kind = parts[1] ?? "UU";
+      if (path) files.push({ path, xy: kind, kind, untracked: false, conflict: true });
     }
   }
   return { files, branch };
@@ -318,6 +373,45 @@ function statusLetter(file) {
   return file.status || "M";
 }
 
+const CONFLICT_KINDS = {
+  DD: "both deleted",
+  AU: "current version added",
+  UD: "incoming version deleted",
+  UA: "incoming version added",
+  DU: "current version deleted",
+  AA: "both added",
+  UU: "both modified",
+};
+
+const CONFLICT_KINDS_REBASE = {
+  DD: "both deleted",
+  AU: "incoming version added",
+  UD: "current version deleted",
+  UA: "current version added",
+  DU: "incoming version deleted",
+  AA: "both added",
+  UU: "both modified",
+};
+
+function conflictKind(file, operation) {
+  return (operation === "rebase" ? CONFLICT_KINDS_REBASE : CONFLICT_KINDS)[file.kind] ?? "unmerged";
+}
+
+function conflictSideFlag(side, operation) {
+  if (operation === "rebase") return side === "current" ? "--theirs" : "--ours";
+  return side === "current" ? "--ours" : "--theirs";
+}
+
+function operationLabel(operation) {
+  switch (operation) {
+    case "merge": return "Merge in progress";
+    case "rebase": return "Rebase in progress";
+    case "cherry-pick": return "Cherry-pick in progress";
+    case "revert": return "Revert in progress";
+    default: return "";
+  }
+}
+
 // ---- diff -------------------------------------------------------------------
 
 const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
@@ -483,6 +577,8 @@ export default class FarrierGit extends View {
     this.handle = cx.focus_handle();
     this.note = null;
     this.noteKind = "";
+    this.noteTask = null;
+    this.noteSeq = 0;
     this.typing = false;
     this.focused = { filter: false, create: false, rename: false, message: false, files: false };
     this.loading = false;
@@ -499,6 +595,9 @@ export default class FarrierGit extends View {
     this.hasHead = false;
     this.staged = [];
     this.changes = [];
+    this.conflicts = [];
+    this.operation = "";
+    this.conflictTarget = null;
     this.fileTotal = 0;
     this.hasUntracked = false;
     this.statsSkipped = false;
@@ -672,6 +771,9 @@ export default class FarrierGit extends View {
 
   async close(_cx) {
     try {
+      this.noteTask?.cancel();
+    } catch {}
+    try {
       this.watchPromise?.cancel();
     } catch {}
     for (const state of [this.messageState, this.fileFilter, this.branchFilter, this.newBranch, this.renameInput]) {
@@ -727,6 +829,9 @@ export default class FarrierGit extends View {
       this.hasHead = false;
       this.staged = [];
       this.changes = [];
+      this.conflicts = [];
+      this.operation = "";
+      this.conflictTarget = null;
       this.notRepo = false;
       this.error = null;
       this.limited = false;
@@ -766,6 +871,9 @@ export default class FarrierGit extends View {
       this.renameText = "";
       this.message = "";
       this.messageState.set_value("");
+      this.noteTask?.cancel();
+      this.noteTask = null;
+      this.noteSeq = (this.noteSeq ?? 0) + 1;
       this.note = null;
     }
     if (!this.context?.cwd || this.loading || this.busy || this.generating) return;
@@ -787,6 +895,9 @@ export default class FarrierGit extends View {
           this.behind = 0;
           this.notRepo = true;
           this.limited = false;
+          this.conflicts = [];
+          this.operation = "";
+          this.conflictTarget = null;
           this.fileTotal = 0;
           this.hasUntracked = false;
           this.statsSkipped = false;
@@ -814,7 +925,7 @@ export default class FarrierGit extends View {
         for (const entry of parsed.files.slice(0, MAX_FILES)) {
           const xy = entry.xy ?? "..";
           if (entry.conflict) {
-            changes.push({ path: entry.path, status: "U", conflict: true, add: 0, del: 0 });
+            changes.push({ path: entry.path, status: "U", kind: entry.kind ?? "UU", conflict: true, add: 0, del: 0 });
             continue;
           }
           if (entry.untracked) {
@@ -833,7 +944,13 @@ export default class FarrierGit extends View {
           }
         }
         staged.sort((a, b) => a.path.localeCompare(b.path));
-        changes.sort((a, b) => a.path.localeCompare(b.path));
+        changes.sort((a, b) => Number(Boolean(b.conflict)) - Number(Boolean(a.conflict)) || a.path.localeCompare(b.path));
+        const conflicts = changes.filter((file) => file.conflict);
+        let operation = this.operation;
+        if (conflicts.length || operation) {
+          operation = await conflictOperation(root, ctx.on);
+          if (this.context !== ctx) return;
+        }
 
         this.root = root;
         this.repoName = baseName(root.replace(/\\/g, "/"));
@@ -846,6 +963,8 @@ export default class FarrierGit extends View {
         this.hasHead = parsed.branch.hasHead;
         this.staged = staged;
         this.changes = changes;
+        this.conflicts = conflicts;
+        this.operation = operation;
         this.fileTotal = parsed.files.length;
         this.hasUntracked = untracked;
         this.statsSkipped = tracked > MAX_STATS_FILES;
@@ -854,13 +973,14 @@ export default class FarrierGit extends View {
         this.error = null;
         this.watchRepo(root, cx);
         if (this.discardTarget && !changes.some((file) => file.path === this.discardTarget.path)) this.discardTarget = null;
+        if (this.conflictTarget && !conflicts.some((file) => file.path === this.conflictTarget.path)) this.conflictTarget = null;
         if (this.discardAll && !changes.length) this.discardAll = false;
         if (this.mode === "branches" && this.branches === null) this.loadBranches(cx);
         if (this.mode === "changes" && this.branchesOpen && this.branches === null && !this.branchLoading) this.loadBranches(cx);
         if (this.mode === "stashes" && this.stashes === null) this.loadStashes(cx);
       } catch (error) {
         if (this.context === ctx) {
-          this.error = String(error);
+          this.error = cleanNote(String(error));
           this.root = null;
           this.repoName = "";
           this.branch = "";
@@ -875,6 +995,9 @@ export default class FarrierGit extends View {
           this.fileLimit = { staged: FILE_PAGE, changes: FILE_PAGE };
           this.staged = [];
           this.changes = [];
+          this.conflicts = [];
+          this.operation = "";
+          this.conflictTarget = null;
           this.notRepo = false;
         }
       } finally {
@@ -906,9 +1029,31 @@ export default class FarrierGit extends View {
 
   // ---- actions ---------------------------------------------------------------
 
-  setNote(text, kind) {
-    this.note = text ? String(text).slice(0, 800) : null;
+  setNote(text, kind, cx) {
+    this.noteTask?.cancel();
+    this.noteTask = null;
+    this.noteSeq = (this.noteSeq ?? 0) + 1;
+    const token = this.noteSeq;
     this.noteKind = kind ?? "error";
+    this.note = text ? cleanNote(text) : null;
+    if (this.note && cx?.timer) {
+      const delay = this.noteKind === "error" ? 9000 : 4000;
+      this.noteTask = cx.timer.after(delay, (cx) => {
+        if (this.noteSeq !== token) return;
+        this.note = null;
+        this.noteTask = null;
+        cx.notify();
+      });
+    }
+    cx?.notify();
+  }
+
+  dismissNote(cx) {
+    this.noteTask?.cancel();
+    this.noteTask = null;
+    this.noteSeq = (this.noteSeq ?? 0) + 1;
+    this.note = null;
+    cx.notify();
   }
 
   stage(files, cx) {
@@ -922,7 +1067,7 @@ export default class FarrierGit extends View {
       try {
         await mustGit(root, on, ["add", "-A", "--", ...files.map((file) => file.path)]);
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -934,6 +1079,10 @@ export default class FarrierGit extends View {
 
   stageAll(cx) {
     if (!this.root || this.busy) return;
+    if (this.conflicts.length) {
+      this.setNote("Resolve conflicts before staging all.", "error", cx);
+      return;
+    }
     const ctx = this.context;
     const root = this.root;
     const on = ctx.on;
@@ -943,7 +1092,7 @@ export default class FarrierGit extends View {
       try {
         await mustGit(root, on, ["add", "-A"]);
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -955,6 +1104,10 @@ export default class FarrierGit extends View {
 
   unstage(files, cx) {
     if (!this.root || !files.length || this.busy) return;
+    if (this.conflicts.length) {
+      this.setNote("Resolve conflicts before unstaging.", "error", cx);
+      return;
+    }
     const ctx = this.context;
     const root = this.root;
     const on = ctx.on;
@@ -967,7 +1120,7 @@ export default class FarrierGit extends View {
         if (result.code !== 0) result = await gitRun(root, on, ["reset", "--quiet", "HEAD", "--", ...paths]);
         if (result.code !== 0) throw new Error(gitError(result));
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -979,6 +1132,10 @@ export default class FarrierGit extends View {
 
   unstageAll(cx) {
     if (!this.root || this.busy) return;
+    if (this.conflicts.length) {
+      this.setNote("Resolve conflicts before unstaging all.", "error", cx);
+      return;
+    }
     const ctx = this.context;
     const root = this.root;
     const on = ctx.on;
@@ -990,7 +1147,7 @@ export default class FarrierGit extends View {
         if (result.code !== 0) result = await gitRun(root, on, ["reset", "--quiet", "HEAD", "."]);
         if (result.code !== 0) throw new Error(gitError(result));
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1008,6 +1165,10 @@ export default class FarrierGit extends View {
   }
 
   askDiscardAll(cx) {
+    if (this.conflicts.length) {
+      this.setNote("Resolve conflicts before discarding all changes.", "error", cx);
+      return;
+    }
     if (!this.changes.length) return;
     this.discardTarget = null;
     this.discardAll = true;
@@ -1029,10 +1190,10 @@ export default class FarrierGit extends View {
         await mustGit(root, on, args);
         if (this.context === ctx) {
           this.discardTarget = null;
-          this.setNote(`Discarded ${baseName(file.path)}`, "success");
+          this.setNote(`Discarded ${baseName(file.path)}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1043,7 +1204,7 @@ export default class FarrierGit extends View {
   }
 
   discardAllChanges(cx) {
-    if (!this.root || !this.changes.length || this.busy) return;
+    if (!this.root || !this.changes.length || this.busy || this.conflicts.length) return;
     const ctx = this.context;
     const root = this.root;
     const on = ctx.on;
@@ -1056,10 +1217,95 @@ export default class FarrierGit extends View {
         if (untracked) await mustGit(root, on, ["clean", "-f", "-d"]);
         if (this.context === ctx) {
           this.discardAll = false;
-          this.setNote("Discarded all changes", "success");
+          this.setNote("Discarded all changes", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
+      } finally {
+        if (this.context === ctx) this.busy = false;
+        this.refresh(cx);
+        cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
+  askConflict(file, cx) {
+    if (!file?.conflict || this.busy) return;
+    this.conflictTarget = file;
+    this.discardTarget = null;
+    this.discardAll = false;
+    cx.notify();
+  }
+
+  resolveConflicts(files, side, cx) {
+    const list = files?.filter((file) => file.conflict) ?? [];
+    if (!this.root || !list.length || this.busy) return;
+    const ctx = this.context;
+    const root = this.root;
+    const on = ctx.on;
+    const flag = conflictSideFlag(side, this.operation);
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async (cx) => {
+      let failed = 0;
+      let detail = "";
+      for (const file of list) {
+        if (this.context !== ctx) return;
+        const checkout = await gitRun(root, on, ["checkout", flag, "--", file.path]);
+        let done = false;
+        let errorText = "";
+        if (checkout.code === 0) {
+          const add = await gitRun(root, on, ["add", "--", file.path]);
+          done = add.code === 0;
+          if (!done) errorText = gitError(add);
+        } else {
+          const stages = await conflictStages(root, on, file.path);
+          const stage = flag === "--ours" ? "2" : "3";
+          if (!stages || (stages.size && stages.has(stage)) || (!stages.size && file.kind !== "DD")) {
+            errorText = gitError(checkout);
+          } else {
+            const rm = await gitRun(root, on, ["rm", "-f", "--", file.path]);
+            done = rm.code === 0;
+            if (!done) errorText = gitError(rm);
+          }
+        }
+        if (!done) {
+          failed++;
+          detail = (detail ? detail + "\n" : "") + `${file.path}: ${errorText || gitError(checkout)}`;
+        }
+      }
+      if (this.context === ctx) {
+        this.conflictTarget = null;
+        if (failed) this.setNote(`Resolved ${list.length - failed} of ${list.length} conflicts. ${detail}`, "error", cx);
+        else this.setNote(`Resolved ${list.length} conflict${list.length === 1 ? "" : "s"} with the ${side} version`, "success", cx);
+      }
+      if (this.context === ctx) this.busy = false;
+      this.refresh(cx);
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  resolveConflict(side, cx) {
+    if (this.conflictTarget) this.resolveConflicts([this.conflictTarget], side, cx);
+  }
+
+  continueOperation(cx) {
+    const operation = this.operation;
+    if (!this.root || this.busy || !operation || operation === "merge") return;
+    const ctx = this.context;
+    const root = this.root;
+    const on = ctx.on;
+    const command = operation === "revert" ? "revert" : operation === "cherry-pick" ? "cherry-pick" : "rebase";
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        await mustGit(root, on, ["-c", "core.editor=true", command, "--continue"], 180000);
+        if (this.context === ctx) this.setNote(`Continued ${operation}`, "success", cx);
+      } catch (error) {
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1071,13 +1317,21 @@ export default class FarrierGit extends View {
 
   commit(cx) {
     if (!this.root || this.busy || this.generating) return;
+    if (this.conflicts.length) {
+      this.setNote("Resolve conflicts before committing.", "error", cx);
+      return;
+    }
+    if (this.operation && this.operation !== "merge") {
+      this.setNote(`Continue the ${this.operation} instead of committing.`, "error", cx);
+      return;
+    }
     if (!this.staged.length) {
-      this.setNote("Stage changes before committing.", "error");
+      this.setNote("Stage changes before committing.", "error", cx);
       cx.notify();
       return;
     }
     if (!this.message.trim()) {
-      this.setNote("Write a commit message.", "error");
+      this.setNote("Write a commit message.", "error", cx);
       cx.notify();
       return;
     }
@@ -1096,10 +1350,10 @@ export default class FarrierGit extends View {
           this.message = "";
           this.messageState.set_value("");
           this.branches = null;
-          this.setNote(`Committed ${head.stdout.trim()}`, "success");
+          this.setNote(`Committed ${head.stdout.trim()}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1118,12 +1372,12 @@ export default class FarrierGit extends View {
   generate(cx) {
     if (!this.root || this.busy || this.generating) return;
     if (!this.staged.length) {
-      this.setNote("Stage changes before generating a message.", "error");
+      this.setNote("Stage changes before generating a message.", "error", cx);
       cx.notify();
       return;
     }
     if (this.context?.on) {
-      this.setNote("Generate commit messages from a local repository.", "error");
+      this.setNote("Generate commit messages from a local repository.", "error", cx);
       cx.notify();
       return;
     }
@@ -1160,10 +1414,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.message = message;
           this.messageState.set_value(message);
-          this.setNote("Generated with Pi", "success");
+          this.setNote("Generated with Pi", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (file) {
           try {
@@ -1192,9 +1446,9 @@ export default class FarrierGit extends View {
         if (!branch) throw new Error("Detached HEAD");
         if (upstream) await mustGit(root, on, ["push"], 180000);
         else await mustGit(root, on, ["push", "-u", "origin", branch], 180000);
-        if (this.context === ctx) this.setNote(upstream ? "Pushed" : `Published ${branch}`, "success");
+        if (this.context === ctx) this.setNote(upstream ? "Pushed" : `Published ${branch}`, "success", cx);
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1207,7 +1461,7 @@ export default class FarrierGit extends View {
   pull(cx) {
     if (!this.root || this.busy) return;
     if (!this.upstream) {
-      this.setNote("No upstream branch. Push first.", "error");
+      this.setNote("No upstream branch. Push first.", "error", cx);
       cx.notify();
       return;
     }
@@ -1222,10 +1476,10 @@ export default class FarrierGit extends View {
         await mustGit(root, on, ["pull", "--ff-only"], 180000);
         if (this.context === ctx) {
           this.branches = null;
-          this.setNote(behind > 0 ? "Pulled" : "Up to date", "success");
+          this.setNote(behind > 0 ? "Pulled" : "Up to date", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1247,10 +1501,10 @@ export default class FarrierGit extends View {
         await mustGit(root, on, ["fetch", "--all", "--prune"], 180000);
         if (this.context === ctx) {
           this.branches = null;
-          this.setNote("Fetched", "success");
+          this.setNote("Fetched", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1287,7 +1541,7 @@ export default class FarrierGit extends View {
           .slice(0, 200);
         this.stashError = null;
       } catch (error) {
-        if (this.context === ctx) this.stashError = String(error);
+        if (this.context === ctx) this.stashError = cleanNote(String(error));
       } finally {
         if (this.context === ctx) this.stashLoading = false;
         cx.notify();
@@ -1340,10 +1594,10 @@ export default class FarrierGit extends View {
         await mustGit(root, on, args, 120000);
         if (this.context === ctx) {
           this.stashes = null;
-          this.setNote(kind === "untracked" ? "Stashed with untracked files" : kind === "staged" ? "Stashed staged changes" : "Stashed changes", "success");
+          this.setNote(kind === "untracked" ? "Stashed with untracked files" : kind === "staged" ? "Stashed staged changes" : "Stashed changes", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1368,10 +1622,10 @@ export default class FarrierGit extends View {
         await mustGit(root, on, ["stash", pop ? "pop" : "apply", ref], 120000);
         if (this.context === ctx) {
           this.stashes = null;
-          this.setNote(`${pop ? "Popped" : "Applied"} ${ref}`, "success");
+          this.setNote(`${pop ? "Popped" : "Applied"} ${ref}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1397,10 +1651,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.stashConfirm = null;
           this.stashes = null;
-          this.setNote(`Dropped ${ref}`, "success");
+          this.setNote(`Dropped ${ref}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1425,10 +1679,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.stashConfirm = null;
           this.stashes = null;
-          this.setNote("Dropped all stashes", "success");
+          this.setNote("Dropped all stashes", "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.setNote(String(error), "error");
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1452,7 +1706,7 @@ export default class FarrierGit extends View {
         await mustGit(root, on, ["fetch", "--all", "--prune"], 180000);
         if (this.context === ctx) this.branches = null;
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1474,9 +1728,9 @@ export default class FarrierGit extends View {
       cx.spawn(async (cx) => {
         try {
           await mustGit(cwd, on, ["init"]);
-          if (this.context === ctx) this.setNote("Initialized repository", "success");
+          if (this.context === ctx) this.setNote("Initialized repository", "success", cx);
         } catch (error) {
-          if (this.context === ctx) this.setNote(String(error), "error");
+          if (this.context === ctx) this.setNote(String(error), "error", cx);
         } finally {
           if (this.context === ctx) this.busy = false;
           this.refresh(cx);
@@ -1685,7 +1939,7 @@ export default class FarrierGit extends View {
           else this.branchExpanded.delete(name);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.branchError = cleanNote(String(error));
       } finally {
         if (this.context === ctx) this.branchLoading = false;
         cx.notify();
@@ -1760,10 +2014,15 @@ export default class FarrierGit extends View {
           this.mode = "changes";
           this.branchAction = null;
           this.branches = null;
-          this.setNote(`Merged ${branch.name}`, "success");
+          this.setNote(`Merged ${branch.name}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) {
+          this.mode = "changes";
+          this.branchAction = null;
+          this.branchError = null;
+          this.setNote(String(error), "error", cx);
+        }
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1789,10 +2048,15 @@ export default class FarrierGit extends View {
           this.mode = "changes";
           this.branchAction = null;
           this.branches = null;
-          this.setNote(`Rebased onto ${branch.name}`, "success");
+          this.setNote(`Rebased onto ${branch.name}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) {
+          this.mode = "changes";
+          this.branchAction = null;
+          this.branchError = null;
+          this.setNote(String(error), "error", cx);
+        }
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1833,10 +2097,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.mode = "changes";
           this.branches = null;
-          this.setNote(`Checked out ${target}`, "success");
+          this.setNote(`Checked out ${target}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1850,8 +2114,7 @@ export default class FarrierGit extends View {
     if (!this.root || this.busy) return;
     const name = this.newBranchText.trim();
     if (!name) {
-      this.branchError = "Type a branch name";
-      cx.notify();
+      this.setNote("Type a branch name", "error", cx);
       return;
     }
     const ctx = this.context;
@@ -1870,10 +2133,10 @@ export default class FarrierGit extends View {
           this.branches = null;
           this.newBranchText = "";
           this.newBranch.set_value("");
-          this.setNote(source ? `Created ${name} from ${source}` : `Created ${name}`, "success");
+          this.setNote(source ? `Created ${name} from ${source}` : `Created ${name}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) this.busy = false;
         this.refresh(cx);
@@ -1915,10 +2178,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.renaming = null;
           this.branches = null;
-          this.setNote(`Renamed to ${newName}`, "success");
+          this.setNote(`Renamed to ${newName}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1951,8 +2214,7 @@ export default class FarrierGit extends View {
     const name = this.deletingRemote;
     const slash = name.indexOf("/");
     if (slash < 1 || slash === name.length - 1) {
-      this.branchError = `Cannot parse remote branch ${name}`;
-      cx.notify();
+      this.setNote(`Cannot parse remote branch ${name}`, "error", cx);
       return;
     }
     const remote = name.slice(0, slash);
@@ -1968,10 +2230,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.deletingRemote = null;
           this.branches = null;
-          this.setNote(`Deleted remote branch ${name}`, "success");
+          this.setNote(`Deleted remote branch ${name}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -1998,10 +2260,10 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.deleting = null;
           this.branches = null;
-          this.setNote(`Deleted ${name}`, "success");
+          this.setNote(`Deleted ${name}`, "success", cx);
         }
       } catch (error) {
-        if (this.context === ctx) this.branchError = String(error);
+        if (this.context === ctx) this.setNote(String(error), "error", cx);
       } finally {
         if (this.context === ctx) {
           this.busy = false;
@@ -2040,7 +2302,7 @@ export default class FarrierGit extends View {
         diff.width = Math.max(620, ...diff.rows.map((row) => (row.text.length + 1) * 7 + 56));
         diff.error = null;
       } catch (error) {
-        diff.error = String(error);
+        diff.error = cleanNote(String(error));
         diff.rows = [];
       } finally {
         cx.notify();
@@ -2200,9 +2462,9 @@ export default class FarrierGit extends View {
       .when(root, (el) =>
         el.children([
           item("commit", "commit", "Commit", (cx) => this.commit(cx), {
-            disabled: busy || !this.staged.length || !this.message.trim(),
+            disabled: busy || !this.staged.length || !this.message.trim() || this.conflicts.length > 0 || (this.operation && this.operation !== "merge"),
             trailing: this.staged.length ? String(this.staged.length) : "",
-            hint: "Commit staged changes",
+            hint: this.conflicts.length ? "Resolve conflicts before committing" : this.operation && this.operation !== "merge" ? `Continue the ${this.operation} instead of committing` : "Commit staged changes",
           }),
           separator(),
           item("push", "arrow-up", this.upstream ? "Push" : "Publish branch", (cx) => this.push(cx), {
@@ -2590,7 +2852,7 @@ export default class FarrierGit extends View {
         .child(icon("branch", t.dim, 24))
         .child(div().text_size(12).text_color(t.muted).child("Not a git repository"))
         .child(button(t, "farrier-git-init", "Initialize repository", "outline", (cx) => this.initRepo(cx), { disabled: busy, px: 10 }))
-        .when(Boolean(this.note), (el) => el.child(div().text_size(11).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)));
+        .when(Boolean(this.note), (el) => el.child(this.renderNote(t, cx)));
     }
     return v_flex()
       .flex_1()
@@ -2601,7 +2863,7 @@ export default class FarrierGit extends View {
       .child(icon("branch", t.dim, 24))
       .child(div().text_size(12).text_color(t.muted).child(this.error ? "Cannot read this repository" : "No repository"))
       .when(Boolean(this.error), (el) => el.child(div().text_size(10.5).text_color(t.blocked).child(this.error)))
-      .when(Boolean(this.note), (el) => el.child(div().text_size(10.5).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)));
+      .when(Boolean(this.note), (el) => el.child(this.renderNote(t, cx)));
   }
 
   resetFilePages() {
@@ -2676,6 +2938,106 @@ export default class FarrierGit extends View {
       .when(!capped, (el) => el.child(button(t, `farrier-git-more-${kind}-button`, `Show ${Math.min(FILE_PAGE, remaining)} more`, "ghost", (cx) => this.showMoreFiles(kind, cx), { h: 26, px: 8 })));
   }
 
+  renderConflictTarget(t, cx, busy) {
+    const file = this.conflictTarget;
+    if (!file) return null;
+    return v_flex()
+      .px(8)
+      .py(6)
+      .gap(6)
+      .rounded(8)
+      .bg(t.raised)
+      .border_1()
+      .border_color(t.blocked + "3d")
+      .child(
+        h_flex()
+          .gap(6)
+          .items_center()
+          .child(icon("merge", t.blocked, 12))
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(1)
+              .child(div().text_size(10.5).text_color(t.foreground).truncate().child(`Resolve ${baseName(file.path)}`))
+              .child(div().text_size(9.5).text_color(t.dim).truncate().child(conflictKind(file, this.operation))),
+          )
+          .child(iconButton(t, "farrier-git-conflict-cancel", "x", "Cancel resolution", (cx) => { this.conflictTarget = null; cx.notify(); }, { size: 18, glyphSize: 10 })),
+      )
+      .child(
+        h_flex()
+          .gap(5)
+          .child(button(t, "farrier-git-conflict-current", "Use current", "outline", (cx) => this.resolveConflict("current", cx), { h: 26, px: 8, disabled: busy, hint: "Take the current version of this file" }))
+          .child(button(t, "farrier-git-conflict-incoming", "Use incoming", "outline", (cx) => this.resolveConflict("incoming", cx), { h: 26, px: 8, disabled: busy, hint: "Take the incoming version of this file" })),
+      );
+  }
+
+  renderOperationCard(t, cx, busy) {
+    const operation = this.operation;
+    if (!operation) return null;
+    const canContinue = operation !== "merge";
+    return h_flex()
+      .id("farrier-git-operation")
+      .px(8)
+      .py(7)
+      .gap(7)
+      .items_center()
+      .rounded(8)
+      .bg(t.raised)
+      .border_1()
+      .border_color(t.border)
+      .child(icon(operation === "merge" ? "merge" : operation === "rebase" ? "rebase" : "commit", t.muted, 13))
+      .child(div().flex_1().min_w(0).text_size(10.5).font_medium().text_color(t.foreground).child(operationLabel(operation)))
+      .when(canContinue, (el) => el.child(button(t, "farrier-git-operation-continue", `Continue ${operation}`, "outline", (cx) => this.continueOperation(cx), { h: 26, px: 8, disabled: busy })));
+  }
+
+  renderConflicts(t, cx) {
+    const count = this.conflicts.length;
+    const operation = operationLabel(this.operation);
+    const busy = this.loading || this.busy || this.generating;
+    if (!count && !operation) return null;
+    return v_flex()
+      .id("farrier-git-conflicts")
+      .flex_none()
+      .mx(9)
+      .mt(4)
+      .gap(5)
+      .when(count > 0, (el) =>
+        el.child(
+          v_flex()
+            .px(8)
+            .py(7)
+            .gap(6)
+            .rounded(8)
+            .bg(t.blocked + "10")
+            .border_1()
+            .border_color(t.blocked + "3a")
+            .child(
+              h_flex()
+                .gap(6)
+                .items_center()
+                .child(icon("merge", t.blocked, 13))
+                .child(
+                  v_flex()
+                    .flex_1()
+                    .min_w(0)
+                    .gap(1)
+                    .child(div().text_size(11).font_medium().text_color(t.blocked).child(`${count} conflict${count === 1 ? "" : "s"}`))
+                    .when(Boolean(operation), (el) => el.child(div().text_size(9.5).text_color(t.dim).child(operation))),
+                ),
+            )
+            .child(
+              h_flex()
+                .gap(5)
+                .child(button(t, "farrier-git-conflict-current-all", "Use current for all", "outline", (cx) => this.resolveConflicts(this.conflicts, "current", cx), { h: 26, px: 7, disabled: busy, hint: "Take the current version for every conflict" }))
+                .child(button(t, "farrier-git-conflict-incoming-all", "Use incoming for all", "outline", (cx) => this.resolveConflicts(this.conflicts, "incoming", cx), { h: 26, px: 7, disabled: busy, hint: "Take the incoming version for every conflict" })),
+            ),
+        ),
+      )
+      .when(count === 0 && Boolean(operation), (el) => el.child(this.renderOperationCard(t, cx, busy)))
+      .when(count > 0 && Boolean(this.conflictTarget), (el) => el.child(this.renderConflictTarget(t, cx, busy)));
+  }
+
   renderFiles(t, cx) {
     const busy = this.loading || this.busy || this.generating;
     const query = this.fileFilterText.trim();
@@ -2696,6 +3058,7 @@ export default class FarrierGit extends View {
       .flex_1()
       .min_h(0)
       .when(showFilter, (el) => el.child(this.renderFileFilter(t, cx, query)))
+      .when(this.conflicts.length || this.operation, (el) => el.child(this.renderConflicts(t, cx)))
       .children(notes.map((note) => div().px(9).pb(3).text_size(10).text_color(t.dim).child(note)))
       .child(
         v_flex()
@@ -2764,6 +3127,7 @@ export default class FarrierGit extends View {
   }
 
   group(t, kind, label, all, visible, busy, cx) {
+    const conflictBlocked = Boolean(this.conflicts.length);
     const add = all.reduce((sum, file) => sum + (file.add || 0), 0);
     const del = all.reduce((sum, file) => sum + (file.del || 0), 0);
     return v_flex()
@@ -2792,8 +3156,8 @@ export default class FarrierGit extends View {
           .child(div().flex_1())
           .when(add > 0, (el) => el.child(div().text_size(10).text_color(t.ansi2).child(`+${add}`)))
           .when(del > 0, (el) => el.child(div().text_size(10).text_color(t.ansi1).child(`−${del}`)))
-          .child(iconButton(t, `farrier-git-all-${kind}`, kind === "staged" ? "minus" : "plus", kind === "staged" ? "Unstage all" : "Stage all", (cx) => (kind === "staged" ? this.unstageAll(cx) : this.stageAll(cx)), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))
-          .when(kind === "changes", (el) => el.child(iconButton(t, "farrier-git-discard-all", "undo", "Discard all changes", (cx) => this.askDiscardAll(cx), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))),
+          .child(iconButton(t, `farrier-git-all-${kind}`, kind === "staged" ? "minus" : "plus", conflictBlocked ? "Resolve conflicts first" : kind === "staged" ? "Unstage all" : "Stage all", (cx) => (kind === "staged" ? this.unstageAll(cx) : this.stageAll(cx)), { disabled: busy || conflictBlocked, size: 24, glyphSize: 13, stopDrag: true }))
+          .when(kind === "changes", (el) => el.child(iconButton(t, "farrier-git-discard-all", "undo", conflictBlocked ? "Resolve conflicts first" : "Discard all changes", (cx) => this.askDiscardAll(cx), { disabled: busy || conflictBlocked, size: 24, glyphSize: 13, stopDrag: true }))),
       )
       .when(!this.folded[kind], (el) =>
         el.children(visible.map((file) => this.fileRow(t, kind, file, busy, cx)))
@@ -2817,6 +3181,7 @@ export default class FarrierGit extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click((_event, cx) => this.openDiff(file, staged, cx))
+      .when(file.conflict, (el) => el.tooltip(`Conflict: ${conflictKind(file, this.operation)}`))
       .child(fileIcon(t, file.path))
       .child(
         h_flex()
@@ -2830,14 +3195,41 @@ export default class FarrierGit extends View {
       .child(div().w(12).flex_none().text_size(10.5).font_semibold().text_color(color).child(statusLetter(file)))
       .when(file.add > 0, (el) => el.child(div().flex_none().text_size(10).text_color(t.ansi2).child(`+${file.add}`)))
       .when(file.del > 0, (el) => el.child(div().flex_none().text_size(10).text_color(t.ansi1).child(`−${file.del}`)))
-      .child(iconButton(t, `farrier-git-toggle-${kind}-${file.path}`, staged ? "minus" : "plus", staged ? "Unstage file" : "Stage file", (cx) => (staged ? this.unstage([file], cx) : this.stage([file], cx)), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true }))
-      .when(!staged, (el) => el.child(iconButton(t, `farrier-git-discard-${file.path}`, "undo", "Discard changes in file", (cx) => this.askDiscard(file, cx), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true })));
+      .when(file.conflict, (el) => el.child(iconButton(t, `farrier-git-resolve-${file.path}`, "merge", "Resolve conflict", (cx) => this.askConflict(file, cx), { disabled: busy, size: 22, glyphSize: 12, color: t.blocked, stopDrag: true })))
+      .child(iconButton(t, `farrier-git-toggle-${kind}-${file.path}`, file.conflict ? "check" : staged ? "minus" : "plus", file.conflict ? "Mark resolved (stage file)" : staged ? "Unstage file" : "Stage file", (cx) => (staged ? this.unstage([file], cx) : this.stage([file], cx)), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true }))
+      .when(!staged && !file.conflict, (el) => el.child(iconButton(t, `farrier-git-discard-${file.path}`, "undo", "Discard changes in file", (cx) => this.askDiscard(file, cx), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true })));
+  }
+
+  renderNote(t, cx) {
+    if (!this.note) return null;
+    const error = this.noteKind === "error";
+    const color = error ? t.blocked : t.done;
+    const all = this.note.split("\n").filter(Boolean);
+    const maxLines = error ? 5 : 2;
+    const shown = all.slice(0, maxLines).join("\n");
+    const more = all.length > maxLines;
+    return h_flex()
+      .id("farrier-git-note")
+      .flex_none()
+      .mx(10)
+      .mb(6)
+      .px(8)
+      .py(6)
+      .gap(7)
+      .items_start()
+      .rounded(8)
+      .bg(error ? t.blocked + "12" : t.done + "12")
+      .border_1()
+      .border_color(error ? t.blocked + "3d" : t.done + "3d")
+      .child(icon(error ? "x" : "check", color, 12))
+      .child(div().flex_1().min_w(0).max_h(76).overflow_hidden().text_size(10.5).text_color(error ? t.foreground : t.muted).tooltip(this.note).child(shown + (more ? "\n…" : "")))
+      .child(iconButton(t, "farrier-git-note-dismiss", "x", "Dismiss message", (cx) => this.dismissNote(cx), { size: 20, glyphSize: 11 }));
   }
 
   renderCommit(t, cx) {
     const busy = this.loading || this.busy || this.generating;
     const hasStaged = Boolean(this.staged.length);
-    const canCommit = Boolean(this.message.trim() && hasStaged && !busy);
+    const canCommit = Boolean(this.message.trim() && hasStaged && !busy && !this.conflicts.length && (!this.operation || this.operation === "merge"));
     return v_flex()
       .flex_none()
       .p(10)
@@ -2864,9 +3256,9 @@ export default class FarrierGit extends View {
           .child(button(t, "farrier-git-generate", this.generating ? "Generating…" : "Generate", "secondary", (cx) => this.generate(cx), { iconName: "sparkles", disabled: busy || !hasStaged, h: 30, px: 9, hint: hasStaged ? "Generate a commit message with Pi from staged changes" : "Stage changes before generating a message" }))
           .child(div().flex_1())
           .child(div().text_size(10).text_color(t.dim).child(this.staged.length ? `${this.staged.length} staged` : ""))
-          .child(button(t, "farrier-git-commit", "Commit", "primary", (cx) => this.commit(cx), { disabled: !canCommit, h: 30, px: 12, hint: "Commit staged changes (Ctrl+Enter)" })),
+          .child(button(t, "farrier-git-commit", "Commit", "primary", (cx) => this.commit(cx), { disabled: !canCommit, h: 30, px: 12, hint: this.conflicts.length ? "Resolve conflicts before committing" : this.operation && this.operation !== "merge" ? `Continue the ${this.operation} instead of committing` : "Commit staged changes (Ctrl+Enter)" })),
       )
-      .when(Boolean(this.note), (el) => el.child(div().text_size(10.5).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)));
+      .when(Boolean(this.note), (el) => el.child(this.renderNote(t, cx)));
   }
 
   renderStashes(t, cx) {
@@ -2931,7 +3323,7 @@ export default class FarrierGit extends View {
           .child(iconButton(t, "farrier-git-stash-refresh", "refresh", "Refresh stashes", (cx) => this.loadStashes(cx), { disabled: busy || this.stashLoading })),
       )
       .when(Boolean(this.stashError), (el) => el.child(div().px(12).pb(6).text_size(10.5).text_color(t.blocked).child(this.stashError)))
-      .when(Boolean(this.note), (el) => el.child(div().px(12).pb(6).text_size(10.5).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)))
+      .when(Boolean(this.note), (el) => el.child(this.renderNote(t, cx)))
       .when(Boolean(confirm), (el) =>
         el.child(
           h_flex()
@@ -3067,7 +3459,7 @@ export default class FarrierGit extends View {
       )
       .when(Boolean(this.branchAction), (el) => el.child(div().px(12).pb(6).text_size(10.5).text_color(t.dim).child(this.branchHint())))
       .when(Boolean(this.branchError), (el) => el.child(div().px(12).pb(6).text_size(10.5).text_color(t.blocked).child(this.branchError)))
-      .when(Boolean(this.note), (el) => el.child(div().px(12).pb(6).text_size(10.5).text_color(this.noteKind === "success" ? t.done : t.blocked).child(this.note)))
+      .when(Boolean(this.note), (el) => el.child(this.renderNote(t, cx)))
       .when(Boolean(this.deleting), (el) =>
         el.child(
           h_flex()
@@ -3253,6 +3645,12 @@ export default class FarrierGit extends View {
       }
       if (this.mode === "stashes") {
         this.closeStashes(cx);
+        cx.stop_propagation();
+        return;
+      }
+      if (this.conflictTarget) {
+        this.conflictTarget = null;
+        cx.notify();
         cx.stop_propagation();
         return;
       }
