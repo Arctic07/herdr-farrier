@@ -1034,11 +1034,15 @@ export default class FarrierGit extends View {
     this.noteTask = null;
     this.noteSeq = (this.noteSeq ?? 0) + 1;
     const token = this.noteSeq;
-    this.noteKind = kind ?? "error";
-    this.note = text ? cleanNote(text) : null;
-    if (this.note && cx?.timer) {
-      const delay = this.noteKind === "error" ? 9000 : 4000;
-      this.noteTask = cx.timer.after(delay, (cx) => {
+    const error = (kind ?? "error") === "error";
+    this.noteKind = "error";
+    this.note = error && text ? cleanNote(text) : null;
+    if (!this.note) {
+      cx?.notify();
+      return;
+    }
+    if (cx?.timer) {
+      this.noteTask = cx.timer.after(9000, (cx) => {
         if (this.noteSeq !== token) return;
         this.note = null;
         this.noteTask = null;

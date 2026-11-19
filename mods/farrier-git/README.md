@@ -37,9 +37,9 @@ stack's `changes` child at `farrier-git`.
   rebase, cherry-pick, or revert, where **Continue** finishes the operation.
   During a rebase the current and incoming sides swap, and choosing a side that
   deleted the file removes it.
-- **Errors**: action errors are stripped of ANSI control codes and shown as a
-  dismissible red card; they disappear after nine seconds. Success notes clear
-  after four.
+- **Errors**: only action failures are shown, as a dismissible red card
+  stripped of ANSI control codes; it disappears after nine seconds. Successful
+  actions show no message.
 - **Branches**: the branch chip opens the branch list; the ellipsis menu adds
   merge, rebase, create, create from a source, rename, delete, delete a remote
   branch, publish, and the full list. Remote branches check out as tracking
