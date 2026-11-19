@@ -466,6 +466,7 @@ export default class FarrierGit extends View {
     this.limited = false;
     this.stale = false;
     this.discardTarget = null;
+    this.discardAll = false;
     this.folded = { staged: false, changes: false };
     this.menu = null;
     this.stashes = null;
@@ -663,6 +664,7 @@ export default class FarrierGit extends View {
       this.error = null;
       this.limited = false;
       this.discardTarget = null;
+      this.discardAll = false;
       this.folded = { staged: false, changes: false };
       this.branches = null;
       this.branchError = null;
@@ -758,6 +760,7 @@ export default class FarrierGit extends View {
         this.error = null;
         this.watchRepo(root, cx);
         if (this.discardTarget && !changes.some((file) => file.path === this.discardTarget.path)) this.discardTarget = null;
+        if (this.discardAll && !changes.length) this.discardAll = false;
         if (this.mode === "branches" && this.branches === null) this.loadBranches(cx);
         if (this.mode === "stashes" && this.stashes === null) this.loadStashes(cx);
       } catch (error) {
@@ -900,6 +903,15 @@ export default class FarrierGit extends View {
 
   askDiscard(file, cx) {
     this.discardTarget = file;
+    this.discardAll = false;
+    this.note = null;
+    cx.notify();
+  }
+
+  askDiscardAll(cx) {
+    if (!this.changes.length) return;
+    this.discardTarget = null;
+    this.discardAll = true;
     this.note = null;
     cx.notify();
   }
@@ -919,6 +931,33 @@ export default class FarrierGit extends View {
         if (this.context === ctx) {
           this.discardTarget = null;
           this.setNote(`Discarded ${baseName(file.path)}`, "success");
+        }
+      } catch (error) {
+        if (this.context === ctx) this.setNote(String(error), "error");
+      } finally {
+        if (this.context === ctx) this.busy = false;
+        this.refresh(cx);
+        cx.notify();
+      }
+    });
+    cx.notify();
+  }
+
+  discardAllChanges(cx) {
+    if (!this.root || !this.changes.length || this.busy) return;
+    const ctx = this.context;
+    const root = this.root;
+    const on = ctx.on;
+    const untracked = this.changes.some((file) => file.fresh);
+    this.busy = true;
+    this.note = null;
+    cx.spawn(async (cx) => {
+      try {
+        await mustGit(root, on, ["restore", "--worktree", "--", "."]);
+        if (untracked) await mustGit(root, on, ["clean", "-f", "-d"]);
+        if (this.context === ctx) {
+          this.discardAll = false;
+          this.setNote("Discarded all changes", "success");
         }
       } catch (error) {
         if (this.context === ctx) this.setNote(String(error), "error");
@@ -2227,6 +2266,7 @@ export default class FarrierGit extends View {
       .p(6)
       .gap(2)
       .when(Boolean(this.discardTarget), (el) => el.child(this.renderDiscard(t, cx)))
+      .when(Boolean(this.discardAll), (el) => el.child(this.renderDiscardAll(t, cx)))
       .children(rows)
       .when(Boolean(this.error), (el) => el.child(div().p(8).text_size(11).text_color(t.blocked).child(this.error)))
       .when(!this.staged.length && !this.changes.length && !this.loading && !this.error, (el) => el.child(this.renderClean(t)))
@@ -2263,6 +2303,25 @@ export default class FarrierGit extends View {
       .child(button(t, "farrier-git-discard-yes", "Discard", "danger", (cx) => this.discard(cx), { h: 26, px: 8 }));
   }
 
+  renderDiscardAll(t, cx) {
+    const untracked = this.changes.some((file) => file.fresh);
+    return h_flex()
+      .id("farrier-git-discard-all-confirm")
+      .flex_none()
+      .px(8)
+      .py(7)
+      .gap(7)
+      .items_center()
+      .rounded(8)
+      .bg(t.raised)
+      .border_1()
+      .border_color(t.border)
+      .child(icon("undo", t.blocked, 13))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.foreground).child(untracked ? "Discard all changes and delete untracked files?" : "Discard all changes?"))
+      .child(button(t, "farrier-git-discard-all-no", "Cancel", "ghost", (cx) => { this.discardAll = false; cx.notify(); }, { h: 26, px: 8 }))
+      .child(button(t, "farrier-git-discard-all-yes", "Discard", "danger", (cx) => this.discardAllChanges(cx), { h: 26, px: 8 }));
+  }
+
   group(t, kind, label, files, busy, cx) {
     const add = files.reduce((sum, file) => sum + (file.add || 0), 0);
     const del = files.reduce((sum, file) => sum + (file.del || 0), 0);
@@ -2292,7 +2351,8 @@ export default class FarrierGit extends View {
           .child(div().flex_1())
           .when(add > 0, (el) => el.child(div().text_size(10).text_color(t.ansi2).child(`+${add}`)))
           .when(del > 0, (el) => el.child(div().text_size(10).text_color(t.ansi1).child(`−${del}`)))
-          .child(iconButton(t, `farrier-git-all-${kind}`, kind === "staged" ? "minus" : "plus", kind === "staged" ? "Unstage all" : "Stage all", (cx) => (kind === "staged" ? this.unstageAll(cx) : this.stageAll(cx)), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true })),
+          .child(iconButton(t, `farrier-git-all-${kind}`, kind === "staged" ? "minus" : "plus", kind === "staged" ? "Unstage all" : "Stage all", (cx) => (kind === "staged" ? this.unstageAll(cx) : this.stageAll(cx)), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))
+          .when(kind === "changes", (el) => el.child(iconButton(t, "farrier-git-discard-all", "undo", "Discard all changes", (cx) => this.askDiscardAll(cx), { disabled: busy, size: 24, glyphSize: 13, stopDrag: true }))),
       )
       .when(!this.folded[kind], (el) => el.children(files.map((file) => this.fileRow(t, kind, file, busy, cx))));
   }
@@ -2754,6 +2814,12 @@ export default class FarrierGit extends View {
       }
       if (this.discardTarget) {
         this.discardTarget = null;
+        cx.notify();
+        cx.stop_propagation();
+        return;
+      }
+      if (this.discardAll) {
+        this.discardAll = false;
         cx.notify();
         cx.stop_propagation();
         return;

@@ -9,7 +9,9 @@ opens push, pull, fetch, branches and stashes.
 
 - **Files**: staged changes and working changes are separate groups. A row
   stages, unstages, or discards one file; a group header stages or unstages all
-  of them. Clicking a file opens its diff in a window.
+  of them. The Changes header also discards all working changes after a
+  confirmation; untracked files are deleted then. Clicking a file opens its diff
+  in a window.
 - **Branches**: the branch chip opens the branch list; the ellipsis menu adds
   merge, rebase, create, create from a source, rename, delete, delete a remote
   branch, publish, and the full list. Remote branches check out as tracking
