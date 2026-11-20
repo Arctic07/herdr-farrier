@@ -3251,7 +3251,7 @@ export default class FarrierGit extends View {
           .py(5)
           .cursor_text()
           .on_mouse_down("left", (_event, cx) => cx.stop_propagation())
-          .child(Textarea.new(this.messageState).w_full().h(66).text_size(12).text_color(t.foreground)),
+          .child(Textarea.new(this.messageState).w_full().text_size(12).text_color(t.foreground)),
       )
       .child(
         h_flex()
