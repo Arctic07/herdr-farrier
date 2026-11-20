@@ -28,7 +28,8 @@ stack's `changes` child at `farrier-git`.
   stages, unstages, or discards one file; a group header stages or unstages all
   of them. The Changes header also discards all working changes after a
   confirmation; untracked files are deleted then. Clicking a file opens its diff
-  in a window. Large change sets get a filter above the list; each group shows
+  in a window. A row can be dragged into a terminal, where its absolute path
+  is inserted. Large change sets get a filter above the list; each group shows
   100 rows and adds 100 at a time up to 300.
 - **Conflicts**: conflicts appear in a red card above Changes with **Use current
   for all** and **Use incoming for all**. A conflict row has a resolve action
@@ -63,7 +64,8 @@ stack's `changes` child at `farrier-git`.
   for local repositories only.
 
 File icons are chosen from the name and extension and tinted from the theme.
-The mod uses theme colors only, so it follows light and dark themes.
+The Files panel uses the same `file-kinds.js` table and glyphs. The mod uses
+theme colors only, so it follows light and dark themes.
 
 ## Limits
 

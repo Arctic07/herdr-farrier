@@ -26,9 +26,10 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
   process and no reload of every open folder. This is the difference from a
   browser that lists each directory separately on every refresh.
 - A watch batch in a repository runs one `git status` and applies only the
-  added, deleted and changed paths in memory; it does not rebuild the index.
-  The initial index is built in chunks so a large repository never blocks the
-  window.
+  added, deleted and changed paths in memory; a batch that only changes status
+  marks redraws without rebuilding the row list. Row lookup and file-kind
+  mapping are cached. The initial index is built in chunks so a large repository
+  never blocks the window.
 - Folders are first, then names, case-insensitively. Git marks appear on the
   right: **A**, **M**, **D**, **U**. Unsaved editor buffers show an accent dot.
 - The list is virtualised: ten thousand visible rows cost about what twenty
@@ -41,6 +42,7 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
   pane**, **Open folder**, **Copy path**, **Rename** and **Delete**. A preview
   tab also offers **Keep open**. Rename and delete ask first; a rename keeps
   open folders where it can. Rows carry their absolute path as a drag payload.
+  File types use the same icons as the Git panel.
 - A single click opens a temporary preview tab. Double-clicking the same row
   (or **Keep open**, or making an edit) makes it permanent. Opening another
   preview replaces the previous one; unsaved edits and split tabs promote
@@ -130,6 +132,7 @@ install keys of its own, so it never takes a chord from another window.
 | `main.js` | The view: location, tree loading and watching, search, tabs, file lifecycle |
 | `tree-view.js` | Tree, Search, context menu and dialogs |
 | `file-view.js` | File header, editor, find widget, Markdown/SVG/CSV views |
+| `file-kinds.js` | The name and extension table, tints and glyphs shared with the Git panel |
 | `files-logic.js` | Tree building, flattening, filtering, status parsing, names and languages |
 | `search-logic.js` | Find/replace engine, globs, ripgrep/grep parsing, result grouping |
 | `preview-logic.js` | CSV parsing, SVG dimensions, raster headers, zoom |

@@ -42,6 +42,8 @@ const FILE_PAGE = 100;
 const FILE_PAGE_MAX = 300;
 const FILE_FILTER_MIN = 30;
 const MAX_DIFF = 24000;
+import { fileKindParts } from "./file-kinds.js";
+
 const ICON = (name) => `mods/farrier-git/icons/${name}.svg`;
 
 // ---- where ------------------------------------------------------------------
@@ -294,69 +296,19 @@ function parseRemoteRefs(text) {
 
 // ---- files ------------------------------------------------------------------
 
-const NAMES = {
-  "package.json": ["json", "ansi3"],
-  "package-lock.json": ["lock", "dim"],
-  "yarn.lock": ["lock", "dim"],
-  "pnpm-lock.yaml": ["lock", "dim"],
-  "cargo.lock": ["lock", "dim"],
-  "composer.lock": ["lock", "dim"],
-  "gemfile.lock": ["lock", "dim"],
-  "pipfile.lock": ["lock", "dim"],
-  "readme.md": ["text", "ansi6"],
-  "readme": ["text", "ansi6"],
-  "license": ["text", "ansi3"],
-  "license.md": ["text", "ansi3"],
-  "changelog.md": ["text", "ansi6"],
-  "dockerfile": ["config", "ansi4"],
-  "makefile": ["config", "ansi3"],
-  "cmakelists.txt": ["config", "ansi4"],
-  ".editorconfig": ["config", "ansi3"],
-  ".gitignore": ["branch", "ansi1"],
-  ".gitattributes": ["branch", "ansi1"],
-  ".gitmodules": ["branch", "ansi1"],
-  "tsconfig.json": ["json", "ansi3"],
-  "jsconfig.json": ["json", "ansi3"],
-};
-
-const EXTENSIONS = {
-  ts: ["code", "ansi4"], tsx: ["code", "ansi4"], mts: ["code", "ansi4"], cts: ["code", "ansi4"],
-  js: ["code", "ansi3"], jsx: ["code", "ansi3"], mjs: ["code", "ansi3"], cjs: ["code", "ansi3"],
-  py: ["code", "ansi2"], pyi: ["code", "ansi2"],
-  rs: ["code", "ansi1"], go: ["code", "ansi6"], java: ["code", "ansi1"], kt: ["code", "ansi5"],
-  kts: ["code", "ansi5"], swift: ["code", "ansi3"], rb: ["code", "ansi1"], php: ["code", "ansi5"],
-  cs: ["code", "ansi4"], c: ["code", "ansi4"], h: ["code", "ansi4"], cc: ["code", "ansi4"],
-  cpp: ["code", "ansi4"], hpp: ["code", "ansi4"], cxx: ["code", "ansi4"], m: ["code", "ansi4"],
-  lua: ["code", "ansi4"], sh: ["shell", "ansi2"], bash: ["shell", "ansi2"], zsh: ["shell", "ansi2"],
-  fish: ["shell", "ansi2"], ps1: ["shell", "ansi4"], bat: ["shell", "ansi2"], cmd: ["shell", "ansi2"],
-  json: ["json", "ansi3"], jsonc: ["json", "ansi3"], json5: ["json", "ansi3"],
-  css: ["style", "ansi5"], scss: ["style", "ansi5"], sass: ["style", "ansi5"], less: ["style", "ansi5"],
-  styl: ["style", "ansi5"],
-  html: ["html", "ansi3"], htm: ["html", "ansi3"], vue: ["html", "ansi2"], svelte: ["html", "ansi1"],
-  astro: ["html", "ansi5"],
-  md: ["text", "ansi6"], mdx: ["text", "ansi6"], txt: ["text", "muted"], rst: ["text", "ansi6"],
-  adoc: ["text", "ansi6"], pdf: ["text", "ansi1"], doc: ["text", "ansi4"], docx: ["text", "ansi4"],
-  png: ["image", "ansi5"], jpg: ["image", "ansi5"], jpeg: ["image", "ansi5"], gif: ["image", "ansi5"],
-  webp: ["image", "ansi5"], svg: ["image", "ansi5"], ico: ["image", "ansi5"], bmp: ["image", "ansi5"],
-  yml: ["config", "ansi5"], yaml: ["config", "ansi5"], toml: ["config", "ansi5"], ini: ["config", "ansi5"],
-  conf: ["config", "ansi5"], env: ["config", "ansi3"], xml: ["config", "ansi5"],
-  sql: ["db", "ansi6"], sqlite: ["db", "ansi6"], db: ["db", "ansi6"],
-  zip: ["file", "dim"], tar: ["file", "dim"], gz: ["file", "dim"], bz2: ["file", "dim"],
-  xz: ["file", "dim"], rar: ["file", "dim"], "7z": ["file", "dim"],
-};
-
 function fileKind(path) {
-  const name = baseName(path).toLowerCase();
-  if (NAMES[name]) return NAMES[name];
-  if (/\.(test|spec)\.[^./]+$/.test(name) || /^(test|spec)\./.test(name)) return ["test", "ansi1"];
-  const dot = name.lastIndexOf(".");
-  const extension = dot >= 0 ? name.slice(dot + 1) : "";
-  return EXTENSIONS[extension] ?? ["file", "muted"];
+  return fileKindParts(baseName(path));
 }
 
 function fileIcon(t, path) {
   const [glyph, color] = fileKind(path);
   return svg(ICON(glyph)).size(14).flex_none().text_color(t[color] ?? t.muted);
+}
+
+function absoluteFilePath(root, path) {
+  const base = String(root ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const rel = String(path ?? "").replace(/\\/g, "/").replace(/^\/+/, "");
+  return base ? `${base}/${rel}` : rel;
 }
 
 function statusColor(t, file) {
@@ -3185,6 +3137,9 @@ export default class FarrierGit extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click((_event, cx) => this.openDiff(file, staged, cx))
+      .when(Boolean(this.root), (el) =>
+        el.drag_paths([absoluteFilePath(this.root, file.path)], this.context?.on ? { on: this.context.on } : undefined),
+      )
       .when(file.conflict, (el) => el.tooltip(`Conflict: ${conflictKind(file, this.operation)}`))
       .child(fileIcon(t, file.path))
       .child(

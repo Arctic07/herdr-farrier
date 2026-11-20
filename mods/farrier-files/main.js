@@ -458,11 +458,16 @@ export default class FarrierFiles extends View {
 
   initTree(cx) {
     this.rows = [];
+    this.rowByPath = new Map();
+    this.rowIndexByPath = new Map();
+    this.kindCache = new Map();
+    this.keyCache = new Map();
     this.nodes = null;
     this.root = "";
     this.on = null;
     this.context = null;
     this.lazy = false;
+    this.prefix = "";
     this.marks = {};
     this.expanded = new Set();
     this.selectedPath = null;
@@ -488,6 +493,7 @@ export default class FarrierFiles extends View {
     this.searchScroll = VirtualListScrollHandle.new();
     this.searchGroups = [];
     this.searchRows = [];
+    this.searchSizes = [];
     this.searchMeta = null;
     this.searchLoading = false;
     this.searchSeq = 0;
@@ -833,7 +839,7 @@ export default class FarrierFiles extends View {
       this.root = "";
       this.on = null;
       this.nodes = null;
-      this.rows = [];
+      this.clearRows();
       this.error = "No folder";
       this.loading = false;
       requestRender(cx);
@@ -844,8 +850,11 @@ export default class FarrierFiles extends View {
       this.context = { key, ...place };
       this.root = place.cwd;
       this.on = place.on ?? null;
+      this.prefix = "";
       this.nodes = null;
-      this.rows = [];
+      this.clearRows();
+      this.kindCache.clear();
+      this.keyCache.clear();
       this.marks = {};
       this.lazy = false;
       this.error = null;
@@ -855,7 +864,7 @@ export default class FarrierFiles extends View {
       this.menuTarget = null;
       this.dialog = null;
       this.searchGroups = [];
-      this.searchRows = [];
+      this.setSearchRows([]);
       this.searchMeta = null;
       this.searchSelectedFile = null;
       this.restoreExpanded();
@@ -943,8 +952,9 @@ export default class FarrierFiles extends View {
           this.lazy = false;
           this.limited = tree.limited;
           this.marks = status?.code === 0 ? parseGitStatus(status.stdout) : {};
-          if (prefix?.code === 0 && String(prefix.stdout ?? "").trim()) {
-            const strip = String(prefix.stdout).trim().replace(/\\/g, "/");
+          this.prefix = prefix?.code === 0 ? String(prefix.stdout ?? "").trim().split("\\").join("/") : null;
+          if (this.prefix) {
+            const strip = this.prefix;
             const relative = Object.create(null);
             for (const [file, mark] of Object.entries(this.marks)) {
               if (file.startsWith(strip)) relative[file.slice(strip.length)] = mark;
@@ -966,7 +976,7 @@ export default class FarrierFiles extends View {
       }
       if (usedGit) {
         this.rebuildRows();
-        if (!this.selectedPath || !this.rows.some((row) => row.path === this.selectedPath)) this.selectedPath = null;
+        if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) this.selectedPath = null;
         if (this.propSearchPending) {
           this.propSearchPending = false;
           this.scheduleSearch(inner);
@@ -982,6 +992,7 @@ export default class FarrierFiles extends View {
         this.lazy = true;
         const tree = buildTree([], MAX_TREE_PATHS);
         this.nodes = tree.root;
+        this.prefix = "";
         this.marks = {};
         this.limited = false;
         await this.ensureFolder("", ctx, token, inner, true);
@@ -995,7 +1006,7 @@ export default class FarrierFiles extends View {
           return;
         }
         this.rebuildRows();
-        if (!this.selectedPath || !this.rows.some((row) => row.path === this.selectedPath)) this.selectedPath = null;
+        if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) this.selectedPath = null;
         if (this.propSearchPending) {
           this.propSearchPending = false;
           this.scheduleSearch(inner);
@@ -1040,33 +1051,36 @@ export default class FarrierFiles extends View {
     const on = this.on;
     cx.spawn(async (inner) => {
       try {
-        const [status, prefix] = await Promise.all([
-          exec("git", [...READ_FLAGS, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on, timeout: 25000 }),
-          exec("git", [...READ_FLAGS, "rev-parse", "--show-prefix"], { cwd: root, on, timeout: 8000 }).catch(() => null),
-        ]);
+        const status = await exec("git", [...READ_FLAGS, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on, timeout: 25000 });
         if (this.changeToken !== token || this.context !== ctx || this.closed) return;
         if (status.code !== 0) {
           this.loadRoot(inner, { silent: true });
           return;
         }
         let records = parseGitStatusRecords(status.stdout);
-        if (prefix?.code === 0 && String(prefix.stdout ?? "").trim()) {
-          const strip = String(prefix.stdout).trim().replace(/\\/g, "/");
-          records = records.filter((record) => record.path.startsWith(strip)).map((record) => ({ ...record, path: record.path.slice(strip.length) }));
-        } else if (prefix?.code !== 0) {
+        if (this.prefix === null) {
           records = [];
+        } else if (this.prefix) {
+          const strip = this.prefix;
+          records = records.filter((record) => record.path.startsWith(strip)).map((record) => ({ ...record, path: record.path.slice(strip.length) }));
         }
         const marks = Object.create(null);
+        let structureChanged = false;
         for (const record of records) {
           marks[record.path] = record.mark;
-          if (record.xy.includes("D")) removeTreePath(this.nodes, record.path);
-          else if (record.mark === "A") addTreePath(this.nodes, record.path);
+          if (record.xy.includes("D")) {
+            if (removeTreePath(this.nodes, record.path)) structureChanged = true;
+          } else if (record.mark === "A" && !findNode(this.nodes, record.path)) {
+            if (addTreePath(this.nodes, record.path)) structureChanged = true;
+          }
         }
         this.marks = marks;
         this.error = null;
-        this.pruneExpanded();
-        this.rebuildRows();
-        if (this.selectedPath && !this.rows.some((row) => row.path === this.selectedPath)) this.selectedPath = null;
+        if (structureChanged) {
+          this.pruneExpanded();
+          this.rebuildRows();
+          if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) this.selectedPath = null;
+        }
         inner.notify();
       } catch {
         if (this.context === ctx) this.loadRoot(inner, { silent: true });
@@ -1096,13 +1110,26 @@ export default class FarrierFiles extends View {
     node.loaded = true;
   }
 
+  clearRows() {
+    this.rows = [];
+    this.rowByPath = new Map();
+    this.rowIndexByPath = new Map();
+  }
+
   rebuildRows() {
     if (!this.nodes) {
-      this.rows = [];
+      this.clearRows();
       return;
     }
     this.rows = filterRows(this.nodes, this.expanded, this.filterText, 30000);
-    if (this.selectedPath && !this.rows.some((row) => row.path === this.selectedPath)) {
+    this.rowByPath = new Map();
+    this.rowIndexByPath = new Map();
+    for (let index = 0; index < this.rows.length; index += 1) {
+      const row = this.rows[index];
+      this.rowByPath.set(row.path, row);
+      this.rowIndexByPath.set(row.path, index);
+    }
+    if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) {
       this.selectedPath = null;
     }
   }
@@ -1232,7 +1259,7 @@ export default class FarrierFiles extends View {
   }
 
   activateTreeRow(key, cx) {
-    const row = this.rows.find((item) => item.path === key);
+    const row = this.rowByPath.get(key);
     if (!row) return;
     this.selectRow(row, cx);
     if (row.dir) {
@@ -1248,13 +1275,13 @@ export default class FarrierFiles extends View {
 
   selectRow(row, cx) {
     this.selectedPath = row.path;
-    const index = this.rows.indexOf(row);
-    if (index >= 0) this.treeScroll?.scroll_to_item(index, "center");
+    const index = this.rowIndexByPath.get(row.path);
+    if (index !== undefined) this.treeScroll?.scroll_to_item(index, "center");
     cx.notify();
   }
 
   rememberTreeRow(key, event, cx) {
-    const row = this.rows.find((item) => item.path === key);
+    const row = this.rowByPath.get(key);
     if (!row) return;
     this.menuTarget = { path: row.path, dir: row.dir };
     this.selectedPath = row.path;
@@ -1560,7 +1587,7 @@ export default class FarrierFiles extends View {
   }
 
   isDir(path) {
-    const row = this.rows.find((item) => item.path === path);
+    const row = this.rowByPath.get(path);
     if (row) return row.dir;
     return Boolean(findNode(this.nodes, path)?.dir);
   }
@@ -1570,11 +1597,21 @@ export default class FarrierFiles extends View {
   }
 
   fileKeyFor(path) {
-    return tabFileKey(this.root, path);
+    let key = this.keyCache.get(path);
+    if (!key) {
+      key = tabFileKey(this.root, path);
+      this.keyCache.set(path, key);
+    }
+    return key;
   }
 
   kindFor(path) {
-    return fileKind(path);
+    let kind = this.kindCache.get(path);
+    if (!kind) {
+      kind = fileKind(path);
+      this.kindCache.set(path, kind);
+    }
+    return kind;
   }
 
   onTreeKey(event, cx) {
@@ -1616,7 +1653,8 @@ export default class FarrierFiles extends View {
       }
     }
     if (this.inputFocused) return;
-    const index = Math.max(0, this.rows.findIndex((row) => row.path === this.selectedPath));
+    const found = this.selectedPath ? this.rowIndexByPath.get(this.selectedPath) : undefined;
+    const index = Math.max(0, found ?? -1);
     if (!this.rows.length) return;
     if (key === "arrow_down") {
       this.selectedPath = this.rows[Math.min(this.rows.length - 1, index + 1)].path;
@@ -1654,7 +1692,7 @@ export default class FarrierFiles extends View {
       const row = this.rows[index];
       if (row?.dir && this.expanded.has(row.path)) this.toggleFolder(row.path, cx);
       else if (row?.parent) {
-        const parentIndex = this.rows.findIndex((item) => item.path === row.parent);
+        const parentIndex = this.rowIndexByPath.get(row.parent);
         if (parentIndex >= 0) {
           this.selectedPath = row.parent;
           this.treeScroll?.scroll_to_item(parentIndex, "center");
@@ -1749,12 +1787,20 @@ export default class FarrierFiles extends View {
     });
   }
 
+  setSearchRows(rows) {
+    const next = rows ?? [];
+    this.searchRows = next;
+    const sizes = new Array(next.length);
+    for (let index = 0; index < next.length; index += 1) sizes[index] = next[index].size ?? 24;
+    this.searchSizes = sizes;
+  }
+
   scheduleSearch(cx) {
     const token = ++this.searchSeq;
     const query = String(this.search.query ?? "");
     if (!query.trim()) {
       this.searchGroups = [];
-      this.searchRows = [];
+      this.setSearchRows([]);
       this.searchMeta = null;
       this.searchLoading = false;
       cx.notify();
@@ -1763,7 +1809,7 @@ export default class FarrierFiles extends View {
     const built = buildFindRegExp(query, this.searchOptions());
     if (!built.valid) {
       this.searchGroups = [];
-      this.searchRows = [];
+      this.setSearchRows([]);
       this.searchMeta = { error: built.error, total: 0, limited: false };
       this.searchLoading = false;
       cx.notify();
@@ -1849,7 +1895,7 @@ export default class FarrierFiles extends View {
         this.searchLoading = false;
         this.searchMeta = { error: cleanError(String(failure)), total: 0, limited: false };
         this.searchGroups = [];
-        this.searchRows = [];
+        this.setSearchRows([]);
         cx.notify();
         return;
       }
@@ -1860,13 +1906,13 @@ export default class FarrierFiles extends View {
       this.searchLoading = false;
       this.searchMeta = { error: classified.error, total: 0, limited: false };
       this.searchGroups = [];
-      this.searchRows = [];
+      this.setSearchRows([]);
       cx.notify();
       return;
     }
     const grouped = groupMatches(raw, { maxFiles: 200, maxMatches: 2000 });
     this.searchGroups = grouped.groups;
-    this.searchRows = searchRows(grouped.groups, this.collapsedFiles);
+    this.setSearchRows(searchRows(grouped.groups, this.collapsedFiles));
     this.searchSelectedFile = null;
     this.searchSelectedMatch = null;
     this.searchMeta = {
@@ -1900,7 +1946,7 @@ export default class FarrierFiles extends View {
       this.searchSelectedMatch = null;
       if (this.collapsedFiles.has(row.file)) this.collapsedFiles.delete(row.file);
       else this.collapsedFiles.add(row.file);
-      this.searchRows = searchRows(this.searchGroups, this.collapsedFiles);
+      this.setSearchRows(searchRows(this.searchGroups, this.collapsedFiles));
       cx.notify();
       return;
     }
@@ -1948,7 +1994,7 @@ export default class FarrierFiles extends View {
       )
       .filter((group) => group.matches.length);
     this.searchSelectedMatch = null;
-    this.searchRows = searchRows(this.searchGroups, this.collapsedFiles);
+    this.setSearchRows(searchRows(this.searchGroups, this.collapsedFiles));
     this.searchMeta = {
       ...(this.searchMeta ?? {}),
       total: this.searchGroups.reduce((n, group) => n + group.matches.length, 0),
@@ -3066,14 +3112,18 @@ export default class FarrierFiles extends View {
     this.selectedPath = activeFile;
     const parts = activeFile.split("/");
     let path = "";
+    let changed = false;
     for (let index = 0; index < parts.length - 1; index += 1) {
       path = path ? `${path}/${parts[index]}` : parts[index];
       const node = findNode(this.nodes, path);
-      if (node?.dir) this.expanded.add(path);
+      if (node?.dir && !this.expanded.has(path)) {
+        this.expanded.add(path);
+        changed = true;
+      }
     }
-    this.rebuildRows();
-    const row = this.rows.findIndex((item) => item.path === activeFile);
-    if (row >= 0) this.treeScroll?.scroll_to_item(row, "center");
+    if (changed) this.rebuildRows();
+    const row = this.rowIndexByPath.get(activeFile);
+    if (row !== undefined) this.treeScroll?.scroll_to_item(row, "center");
   }
 
   // ---- render ---------------------------------------------------------------

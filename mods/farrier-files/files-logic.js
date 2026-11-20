@@ -1,6 +1,8 @@
 // Pure file-tree helpers for farrier-files. No GPUI or Herdr imports, so the
 // tree shape, filtering and language mapping can be checked with Node.
 
+import { fileKindParts } from "./file-kinds.js";
+
 export const MAX_TREE_PATHS = 30000;
 
 export function normalizePath(path) {
@@ -114,33 +116,10 @@ export function detectLanguage(path) {
   return { language: ext || "text", label: ext ? ext.toUpperCase() : "Text" };
 }
 
-const CODE_EXT = new Set([
-  "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "pyi", "rs", "go",
-  "java", "kt", "kts", "swift", "rb", "php", "cs", "c", "h", "cc", "cpp", "cxx",
-  "hpp", "lua", "vue", "svelte", "astro",
-]);
-const JSON_EXT = new Set(["json", "jsonc", "json5", "lock"]);
-const CONFIG_EXT = new Set(["yml", "yaml", "toml", "ini", "conf", "env", "xml", "css", "scss", "sass", "less"]);
-const SHELL_EXT = new Set(["sh", "bash", "zsh", "fish", "ps1", "bat", "cmd"]);
-const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
-const TEXT_EXT = new Set(["md", "markdown", "mdx", "txt", "rst", "adoc"]);
-const SHEET_EXT = new Set(["csv", "tsv", "xlsx", "xlsm", "xls"]);
-
 export function fileKind(path) {
-  const { base, ext } = splitPathInfo(path);
-  const lower = base.toLowerCase();
-  if (lower === "readme" || lower === "readme.md") return { icon: "text", tone: "ansi6" };
-  if (lower === "license" || lower === "license.md") return { icon: "text", tone: "ansi3" };
-  if (lower === ".gitignore" || lower === ".gitattributes" || lower === ".gitmodules") return { icon: "config", tone: "ansi1" };
-  if (/\.(test|spec)\.[^./]+$/.test(lower) || /^(test|spec)\./.test(lower)) return { icon: "test", tone: "ansi1" };
-  if (JSON_EXT.has(ext)) return { icon: "json", tone: "ansi3" };
-  if (CONFIG_EXT.has(ext)) return { icon: "config", tone: "ansi5" };
-  if (SHELL_EXT.has(ext)) return { icon: "shell", tone: "ansi2" };
-  if (IMAGE_EXT.has(ext)) return { icon: "image", tone: "ansi5" };
-  if (TEXT_EXT.has(ext)) return { icon: "text", tone: ext === "txt" ? "muted" : "ansi6" };
-  if (SHEET_EXT.has(ext)) return { icon: "table", tone: "ansi2" };
-  if (CODE_EXT.has(ext)) return { icon: "code", tone: "ansi4" };
-  return { icon: "file", tone: "muted" };
+  const { base } = splitPathInfo(path);
+  const [icon, tone] = fileKindParts(base);
+  return { icon, tone };
 }
 
 export function isMarkdown(path) {
@@ -151,6 +130,8 @@ export function isMarkdown(path) {
 export function isSvg(path) {
   return splitPathInfo(path).ext === "svg";
 }
+
+const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
 
 export function isRasterImage(path) {
   return IMAGE_EXT.has(splitPathInfo(path).ext) && !isSvg(path);
@@ -380,27 +361,35 @@ export function visibleRows(root, expanded, maxRows = 20000) {
   return rows;
 }
 
+function keepAncestors(keep, path) {
+  let slash = path.lastIndexOf("/");
+  while (slash > 0) {
+    const parent = path.slice(0, slash);
+    if (keep.has(parent)) break;
+    keep.add(parent);
+    slash = parent.lastIndexOf("/");
+  }
+}
+
 export function filterRows(root, expanded, query, maxRows = 20000) {
   const q = String(query ?? "").trim().toLowerCase();
   if (!q) return visibleRows(root, expanded, maxRows);
   const keep = new Set();
-  const stack = [{ node: root, ancestors: [] }];
+  const kidsOf = (node) => (node.children instanceof Map ? node.children : node.children ?? []);
+  const stack = [root];
   while (stack.length) {
-    const { node, ancestors } = stack.pop();
-    const kids = node.children instanceof Map ? node.children : node.children ?? [];
-    for (const child of kids) {
+    const node = stack.pop();
+    for (const child of kidsOf(node)) {
       const hit = child.path.toLowerCase().includes(q) || child.name.toLowerCase().includes(q);
       if (hit) {
         keep.add(child.path);
-        for (const parent of ancestors) keep.add(parent);
-        if (node !== root) keep.add(node.path);
+        keepAncestors(keep, child.path);
       }
-      if (child.dir) stack.push({ node: child, ancestors: [...ancestors, child.path] });
+      if (child.dir) stack.push(child);
     }
   }
   const rows = [];
-  const stack2 = [{ node: root, depth: 0 }];
-  const kidsOf = (node) => (node.children instanceof Map ? node.children : node.children ?? []);
+  const stack2 = [];
   const rootKids = kidsOf(root);
   for (let i = rootKids.length - 1; i >= 0; i -= 1) stack2.push({ node: rootKids[i], depth: 0 });
   while (stack2.length && rows.length < maxRows) {

@@ -3,6 +3,8 @@
 //   node --test tests/files-logic.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import {
   buildTree,
@@ -17,6 +19,8 @@ import {
   removeTreePath,
   detectLanguage,
   fileKind,
+  isRasterImage,
+  isSvg,
   pickTabName,
   tabFileKey,
   isEmptyPane,
@@ -40,6 +44,16 @@ import {
   byteOffsetToChar,
   buildRgArgs,
 } from "../mods/farrier-files/search-logic.js";
+import {
+  FILE_NAMES as FILES_NAMES,
+  FILE_EXTENSIONS as FILES_EXTENSIONS,
+  fileKindParts as fileKindPartsFromFiles,
+} from "../mods/farrier-files/file-kinds.js";
+import {
+  FILE_NAMES as GIT_NAMES,
+  FILE_EXTENSIONS as GIT_EXTENSIONS,
+  fileKindParts as fileKindPartsFromGit,
+} from "../mods/farrier-git/file-kinds.js";
 import {
   parseWorkbookPackage,
   parseSheetXml,
@@ -74,6 +88,16 @@ test("paths, targets and names", () => {
   assert.equal(detectLanguage("main.py").language, "python");
   assert.equal(detectLanguage("Makefile").language, "makefile");
   assert.deepEqual(fileKind("a.test.ts"), { icon: "test", tone: "ansi1" });
+  assert.deepEqual(fileKind("app.tsx"), { icon: "code", tone: "ansi4" });
+  assert.deepEqual(fileKind("style.css"), { icon: "style", tone: "ansi5" });
+  assert.deepEqual(fileKind("page.html"), { icon: "html", tone: "ansi3" });
+  assert.deepEqual(fileKind(".gitignore"), { icon: "branch", tone: "ansi1" });
+  assert.deepEqual(fileKind("bundle.zip"), { icon: "archive", tone: "dim" });
+  assert.deepEqual(fileKind("data.csv"), { icon: "table", tone: "ansi2" });
+  assert.deepEqual(fileKind("schema.sql"), { icon: "db", tone: "ansi6" });
+  assert.equal(isRasterImage("old.PNG"), true);
+  assert.equal(isRasterImage("shape.svg"), false);
+  assert.equal(isSvg("shape.svg"), true);
   assert.equal(pickTabName("src/index.js", ["index.js"], "/r"), "src/index.js");
   assert.equal(tabFileKey("/r/", "a.js"), '["/r","a.js"]');
 });
@@ -217,4 +241,22 @@ test("base64 round trip and UTF-8", () => {
   const encoded = utf8ToBase64(text);
   assert.equal(encoded, Buffer.from(text, "utf8").toString("base64"));
   assert.deepEqual(decodeBase64(encoded), [...Buffer.from(text, "utf8")]);
+});
+
+test("file icons are shared by both panels", () => {
+  const icons = ["archive", "branch", "code", "config", "db", "file", "html", "image", "json", "lock", "shell", "style", "table", "test", "text"];
+  for (const mod of ["farrier-files", "farrier-git"]) {
+    for (const name of icons) {
+      const path = fileURLToPath(new URL(`../mods/${mod}/icons/${name}.svg`, import.meta.url));
+      assert.equal(existsSync(path), true, `${mod} is missing ${name}.svg`);
+    }
+  }
+});
+
+test("Files and Git share one file-kind table", () => {
+  assert.deepEqual(FILES_NAMES, GIT_NAMES);
+  assert.deepEqual(FILES_EXTENSIONS, GIT_EXTENSIONS);
+  for (const name of ["app.ts", "style.css", "page.html", ".gitignore", "data.csv", "bundle.zip", "schema.sql", "README.md"]) {
+    assert.deepEqual(fileKindPartsFromFiles(name), fileKindPartsFromGit(name), name);
+  }
 });

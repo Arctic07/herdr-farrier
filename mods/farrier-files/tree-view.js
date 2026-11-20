@@ -170,7 +170,10 @@ export function renderTreePane(view, t, cx) {
 
 function treeRow(view, row, t) {
   const selected = view.selectedPath === row.path;
-  const dirty = !row.dir && view.dirtyMap?.[view.fileKeyFor(row.path)] === true;
+  const kind = row.dir ? null : view.kindFor(row.path);
+  const key = row.dir ? "" : view.fileKeyFor(row.path);
+  const dirty = view.dirtyMap?.[key] === true;
+  const preview = row.dir ? false : view.previewKeys?.has(key) === true;
   const mark = view.marks?.[row.path];
   const guide = 8 + (row.depth - 1) * 16;
   let el = h_flex()
@@ -209,14 +212,14 @@ function treeRow(view, row, t) {
         ? icon(view.expanded.has(row.path) ? "chevron-down" : "chevron-right", t.dim, 11)
         : div().w(11).flex_none(),
     )
-    .child(icon(row.dir ? (view.expanded.has(row.path) ? "folder-open" : "folder") : view.kindFor(row.path).icon, row.dir ? t.muted : t[view.kindFor(row.path).tone] ?? t.muted, 14))
+    .child(icon(row.dir ? (view.expanded.has(row.path) ? "folder-open" : "folder") : kind.icon, row.dir ? t.muted : t[kind.tone] ?? t.muted, 14))
     .child(
       div()
         .flex_1()
         .min_w(0)
         .truncate()
         .font_medium()
-        .when(!row.dir && view.previewKeys?.has(view.fileKeyFor(row.path)), (e) => e.italic().text_color(t.dim))
+        .when(preview, (e) => e.italic().text_color(t.dim))
         .when(row.hit, (e) => e.text_color(t.accent))
         .child(row.name),
     );
@@ -373,7 +376,7 @@ export function renderSearchSection(view, t, cx) {
         v_virtual_list(
           SEARCH_ID,
           view.searchRows.length,
-          view.searchRows.length ? view.searchRows.map((row) => row.size) : 24,
+          view.searchSizes?.length ? view.searchSizes : 24,
           (index) => view.searchRows[index]?.key ?? String(index),
           (range) => view.searchRows.slice(range.start, range.end).map((row) => searchRow(view, row, t)),
         )
@@ -401,6 +404,7 @@ export function renderSearchSection(view, t, cx) {
 function searchRow(view, row, t) {
   if (row.kind === "file") {
     const { base, dir } = splitPathInfo(row.file);
+    const kind = view.kindFor(row.file);
     const selected = view.searchSelectedFile === row.file;
     return h_flex()
       .id(`farrier-files-search-file-${row.file}`)
@@ -415,7 +419,7 @@ function searchRow(view, row, t) {
       .when(selected, (e) => e.bg(t.selected))
       .hover((s) => s.bg(selected ? t.selected : t.hover))
       .child(icon(row.collapsed ? "chevron-right" : "chevron-down", t.dim, 10))
-      .child(icon(view.kindFor(row.file).icon, t[view.kindFor(row.file).tone] ?? t.muted, 13))
+      .child(icon(kind.icon, t[kind.tone] ?? t.muted, 13))
       .child(div().min_w(0).max_w(150).truncate().text_size(11.5).font_medium().child(base))
       .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(dir ? `${dir}` : ""))
       .child(countBadge(t, String(row.count)));
@@ -495,7 +499,7 @@ function menuItem(t, id, label, onClick, view, options = {}) {
 
 export function renderContextMenu(view, t, cx) {
   const menu = view.menu;
-  const target = view.rows.find((row) => row.path === menu.path) ?? { path: menu.path, name: splitPathInfo(menu.path).base, dir: menu.dir };
+  const target = view.rowByPath?.get(menu.path) ?? { path: menu.path, name: splitPathInfo(menu.path).base, dir: menu.dir };
   const x = Math.max(8, Math.min(menu.x, (menu.bounds?.width ?? 300) - 228));
   const y = Math.max(8, Math.min(menu.y, (menu.bounds?.height ?? 300) - 190));
   const items = view.menuItems ?? [];
