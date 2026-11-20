@@ -51,7 +51,7 @@ try {
   # ---- a fresh install writes what install.tsv lists -------------------------
   $HerdrHome = FreshHome
   if ((Run @("-y")) -ne 0) { Fail "fresh install exited non-zero" }
-  foreach ($path in @("themes/farrier-charcoal.json", "layouts/farrier.json", "layouts/farrier.svg", "mods/farrier/main.js", "mods/farrier-git/main.js")) {
+  foreach ($path in @("themes/farrier-charcoal.json", "layouts/farrier.json", "layouts/farrier.svg", "mods/farrier/main.js", "mods/farrier-git/main.js", "mods/farrier-files/main.js")) {
     if (-not (Test-Path -LiteralPath (Join-Path $HerdrHome $path))) { Fail "fresh install missed $path" }
   }
   Ok "fresh install writes every row"
@@ -109,7 +109,7 @@ try {
   if ((Run @("-y")) -ne 0) { Fail "install before remove failed" }
   [IO.File]::WriteAllText((Join-Path $HerdrHome "settings.json"), '{"keep":true}')
   if ((Run @("--remove", "-y")) -ne 0) { Fail "remove exited non-zero" }
-  foreach ($path in @("themes/farrier-charcoal.json", "layouts/farrier.json", "mods/farrier", "mods/farrier-git")) {
+  foreach ($path in @("themes/farrier-charcoal.json", "layouts/farrier.json", "mods/farrier", "mods/farrier-git", "mods/farrier-files")) {
     if (Test-Path -LiteralPath (Join-Path $HerdrHome $path)) { Fail "remove left $path behind" }
   }
   if (-not (Test-Path -LiteralPath (Join-Path $HerdrHome "settings.json"))) { Fail "remove touched settings.json" }

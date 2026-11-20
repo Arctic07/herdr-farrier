@@ -17,6 +17,12 @@ jobs:
       - name: Static checks
         run: node scripts/check.mjs
 
+      - name: Mod syntax
+        run: node --experimental-vm-modules tests/mod-syntax.mjs
+
+      - name: Logic tests
+        run: node --test tests/files-logic.test.mjs
+
       - name: Shell syntax
         run: sh -n install.sh && sh -n tests/install.test.sh
 

@@ -1,6 +1,6 @@
 # Farrier
 
-A Herdr layout, two mods and its theme. Each part installs on its own; the
+A Herdr layout, three mods and its theme. Each part installs on its own; the
 layout only names the parts it shows.
 
 Farrier is a keyboard-first window for running coding agents: spaces and agents
@@ -8,7 +8,9 @@ on the left, framed panes with a header in the middle, and a bottom strip that
 says how many agents wait on you, work, or finished while you looked elsewhere.
 The **Changes** button in the tab bar opens a Changes panel: staged files,
 branches, stashes, a push/pull/fetch menu and a commit box that can use Pi to
-write the message.
+write the message. The **Files** button opens a repository tree with workspace
+search and replace, plus a file tab with editing, find and Markdown/image/CSV
+previews.
 
 ![Farrier](layouts/farrier.svg)
 
@@ -61,12 +63,13 @@ first install if the window was already open.
 
 | File | What it is |
 |---|---|
-| `layouts/farrier.json` | the window: sidebar, tabs, framed panes, hidden Changes panel, bottom strip |
+| `layouts/farrier.json` | the window: sidebar, tabs, framed panes, hidden Files and Changes panels, bottom strip |
 | `layouts/farrier.svg` | the picture Settings shows for the layout |
 | `themes/farrier-charcoal.json` | charcoal, paper-white and cyan; selectable in every layout |
 | `mods/farrier/` | the bottom strip: machine, space, branch, agents waiting |
 | `mods/farrier/fonts/` | HarmonyOS Sans SC, and the license that covers it |
 | `mods/farrier-git/` | the Changes panel: staged files, branches, diff window, commit box |
+| `mods/farrier-files/` | the Files panel: repo tree, workspace search, file editor, preview tabs and previews |
 | `keys.pack.json` | the layout's key section, merged only with `--keys` |
 | `install.tsv` | what gets installed, and where |
 | `reserved.txt` | the names Herdr ships, which Farrier refuses to take |
@@ -80,20 +83,23 @@ first install if the window was already open.
 | Window layout | `farrier-layout` | Names the mods it shows; a missing one leaves that block empty. |
 | Bottom strip | `farrier-mod` | One mod; the layout places it. |
 | Changes panel | `farrier-git` | Uses theme colors only. Add this block to a personal layout, or let the farrier layout place it. |
+| Files panel | `farrier-files` | Uses theme colors only. Add this block to a personal layout, or let the farrier layout place it. |
 
 ```json
-{ "id": "farrier-git", "type": "block", "content": { "mod": "farrier-git" } }
+{ "id": "changes", "type": "block", "content": { "mod": "farrier-git" } }
+{ "id": "files", "type": "block", "content": { "mod": "farrier-files" } }
 ```
 
 Clone a Herdr layout first: shipped layouts are restored on start. The tab
-bar's **Changes** button drives the `panel-body` stack's `changes` child; to
-use that button for this panel, make that child use `farrier-git`, or open the
-block directly. The layout's default theme and UI font come from other parts;
+bar's **Files** and **Changes** buttons drive the `panel-body` stack's
+`files` and `changes` children; to use those buttons for these panels, make
+those children use `farrier-files` and `farrier-git`, or open the block
+directly. The layout's default theme and UI font come from other parts;
 without them Herdr falls back to its own.
 
 For example, `powershell -ExecutionPolicy Bypass -File install.ps1 farrier-git`
 or `sh install.sh farrier-git` installs only the Changes panel, with no layout
-and no theme.
+and no theme. The same works with `farrier-files` for the Files panel.
 
 ## Keys
 
@@ -120,7 +126,7 @@ sh install.sh --remove
 are still Farrier's own, and leaves the rest of the Herdr home alone. Switch to
 another layout first if Farrier is the shown one. To do it by hand, delete
 `layouts/farrier.json`, `layouts/farrier.svg`, `themes/farrier-charcoal.json`,
-`mods/farrier/` and `mods/farrier-git/` from the Herdr home, and the
+`mods/farrier/`, `mods/farrier-git/` and `mods/farrier-files/` from the Herdr home, and the
 `layout:farrier` section from `keys.json`. An older install may also have
 `themes/farrier.json`; the installer removes it once the layout is updated,
 and keeps it while the installed layout still names it.
@@ -137,6 +143,8 @@ and keeps it while the installed layout still names it.
 
 ```sh
 node scripts/check.mjs        # catalogue, names, JSON, references, keys
+node --experimental-vm-modules tests/mod-syntax.mjs  # every mod parses
+node --test tests/files-logic.test.mjs  # tree, search and preview logic
 sh tests/install.test.sh      # installer behaviour in throwaway homes
 ```
 

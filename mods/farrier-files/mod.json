@@ -1,0 +1,8 @@
+{
+  "name": "farrier-files",
+  "version": "0.1.0",
+  "title": "Files",
+  "description": "Repo file tree with instant folder expansion, workspace search and replace, and a file tab with editing, find, and previews",
+  "place": "none",
+  "focusable": true
+}

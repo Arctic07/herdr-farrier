@@ -6,3 +6,4 @@ farrier-layout	layout	layouts/farrier.json	layouts/farrier.json	The Farrier layo
 farrier-preview	file	layouts/farrier.svg	layouts/farrier.svg	Picture shown for the layout in Settings
 farrier-mod	mod	mods/farrier	mods/farrier	Bottom strip: machine, space, branch, how many agents wait
 farrier-git	mod	mods/farrier-git	mods/farrier-git	Changes panel: staged files, branches, stashes and commit messages
+farrier-files	mod	mods/farrier-files	mods/farrier-files	Files panel: repo tree, search and replace, editor and previews

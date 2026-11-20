@@ -40,7 +40,7 @@ run() {
 # ---- a fresh install writes what install.tsv lists ---------------------------
 fresh_home
 out=$(run 2>&1) || fail "fresh install exited non-zero: $out"
-for path in themes/farrier-charcoal.json layouts/farrier.json layouts/farrier.svg mods/farrier/main.js mods/farrier-git/main.js; do
+for path in themes/farrier-charcoal.json layouts/farrier.json layouts/farrier.svg mods/farrier/main.js mods/farrier-git/main.js mods/farrier-files/main.js; do
   [ -e "$tmp/home/$path" ] || fail "fresh install missed $path"
 done
 ok "fresh install writes every row"
@@ -180,7 +180,7 @@ fresh_home
 run >/dev/null 2>&1 || fail "install before remove failed"
 echo '{"keep":true}' >"$tmp/home/settings.json"
 run --remove >/dev/null 2>&1 || fail "remove exited non-zero"
-for path in themes/farrier-charcoal.json layouts/farrier.json mods/farrier mods/farrier-git; do
+for path in themes/farrier-charcoal.json layouts/farrier.json mods/farrier mods/farrier-git mods/farrier-files; do
   [ ! -e "$tmp/home/$path" ] || fail "remove left $path behind"
 done
 [ -f "$tmp/home/settings.json" ] || fail "remove touched settings.json"

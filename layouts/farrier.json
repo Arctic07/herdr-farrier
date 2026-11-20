@@ -101,7 +101,7 @@
                     {
                       "id": "files",
                       "type": "block",
-                      "content": { "mod": "files" }
+                      "content": { "mod": "farrier-files" }
                     },
                     {
                       "id": "changes",
