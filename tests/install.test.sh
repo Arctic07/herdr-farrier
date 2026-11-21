@@ -174,6 +174,93 @@ else
   ok "removing the Changes panel keeps the layout key (not tested without python3)"
 fi
 
+# ---- a dry run names blocks, pane headers, floating blocks and toast --------
+if command -v python3 >/dev/null 2>&1; then
+  fresh_home
+  run >/dev/null 2>&1 || fail "install before the extra-block check failed"
+  python3 - "$tmp/home/layouts/farrier.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    layout = json.load(f)
+layout["children"].append({"id": "extra-test", "type": "block",
+                           "content": {"mod": "herdr-extra-test"}, "size": {"px": 200}})
+layout["children"].append({"id": "extra-pane", "type": "block",
+                           "content": {"tab": "active",
+                                       "pane": {"header": {"content": {"mod": "herdr-extra-pane"}}}}})
+layout["floating"] = [{"id": "extra-float", "content": {"mod": "herdr-extra-floating"}}]
+layout["toast"] = "herdr-extra-toast"
+with open(path, "w") as f:
+    json.dump(layout, f, indent=2)
+PY
+  out=$(run --update --dry-run farrier-layout 2>&1) || fail "dry run with extra blocks exited non-zero: $out"
+  for name in herdr-extra-test herdr-extra-pane herdr-extra-floating herdr-extra-toast; do
+    echo "$out" | grep -q "$name" || fail "dry run did not name $name: $out"
+  done
+  echo "$out" | grep -q "also places mods" || fail "dry run did not use the plural: $out"
+  grep -q "herdr-extra-test" "$tmp/home/layouts/farrier.json" || fail "dry run wrote the layout"
+  out=$(run --update farrier-layout 2>&1) || fail "real update with extra blocks exited non-zero: $out"
+  echo "$out" | grep -q "also places" && fail "real update printed the dry-run note: $out"
+  ok "a dry run names blocks, pane headers, floating blocks and toast"
+else
+  ok "a dry run names extra blocks (not tested without python3)"
+fi
+
+# ---- a corrupt installed layout does not crash the dry run ------------------
+if command -v python3 >/dev/null 2>&1; then
+  fresh_home
+  run >/dev/null 2>&1 || fail "install before the corrupt-layout check failed"
+  printf '{broken
+' >"$tmp/home/layouts/farrier.json"
+  out=$(run --update --dry-run farrier-layout 2>&1) || fail "dry run with a corrupt layout exited non-zero: $out"
+  echo "$out" | grep -q "could not be read" || fail "dry run did not say the layout could not be read: $out"
+  echo "$out" | grep -q "Traceback" && fail "dry run printed a traceback: $out"
+  ok "a corrupt installed layout does not crash the dry run"
+else
+  ok "corrupt installed layout (not tested without python3)"
+fi
+
+# ---- without python3 the dry run says the check was skipped -----------------
+if command -v python3 >/dev/null 2>&1; then
+  nopy=$tmp/nopy
+  mkdir -p "$nopy"
+  printf '#!/bin/sh
+exit 0
+' >"$nopy/herdr-app"
+  chmod +x "$nopy/herdr-app"
+  case $(uname -s) in
+    MINGW*|MSYS*|CYGWIN*) no_py_path=$nopy:/usr/bin ;;
+    *)
+      for tool in awk sed grep wc paste basename dirname cat mkdir rm cp mv diff cmp date tr sort head tail find sh; do
+        src=$(command -v "$tool" 2>/dev/null) || continue
+        ln -sf "$src" "$nopy/$tool" 2>/dev/null || cp "$src" "$nopy/$tool"
+      done
+      no_py_path=$nopy
+      ;;
+  esac
+  if PATH=$no_py_path command -v python3 >/dev/null 2>&1; then
+    ok "no-python3 dry run (skipped: python3 is in the tool path)"
+  else
+  fresh_home
+  run >/dev/null 2>&1 || fail "install before the no-python3 check failed"
+  python3 - "$tmp/home/layouts/farrier.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    layout = json.load(f)
+layout["children"].append({"id": "extra-test", "type": "block",
+                           "content": {"mod": "herdr-extra-test"}})
+with open(path, "w") as f:
+    json.dump(layout, f, indent=2)
+PY
+    out=$(PATH=$no_py_path HERDR_APP_HOME=$tmp/home sh "$repo/install.sh" --update --dry-run farrier-layout 2>&1)       || fail "dry run without python3 exited non-zero: $out"
+    echo "$out" | grep -q "no python3: blocks" || fail "dry run did not say the blocks were not checked: $out"
+    ok "without python3 a dry run says the extra blocks were not checked"
+  fi
+else
+  ok "no-python3 dry run (not tested without python3)"
+fi
+
 # ---- uninstall takes out what it put in, and leaves the rest ----------------
 (cd "$here" && tar -cf - --exclude .git themes) | (cd "$repo" && tar -xf -)
 fresh_home

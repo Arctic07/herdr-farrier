@@ -25,6 +25,11 @@ function Run([string[]]$arguments) {
   $output | Write-Host
   return $code
 }
+function RunOutput([string[]]$arguments) {
+  $output = & $shell -NoProfile -ExecutionPolicy Bypass -File $install @arguments 2>&1
+  $output | Write-Host
+  return ($output | Out-String)
+}
 function Set-LayoutTheme([string]$HerdrHome, [string]$theme) {
   $path = Join-Path $HerdrHome "layouts/farrier.json"
   $text = (Get-Content -LiteralPath $path -Raw) -replace '"theme": "[^"]+"', ('"theme": "' + $theme + '"')
@@ -103,6 +108,35 @@ try {
   $keys = Get-Content -LiteralPath $keysPath -Raw | ConvertFrom-Json
   if (-not $keys.'layout:farrier'.'ctrl-shift-a') { Fail "removing the Changes panel removed the layout key" }
   Ok "removing the Changes panel keeps the layout key"
+
+  # ---- a dry run names blocks, pane headers, floating blocks and toast ------
+  $HerdrHome = FreshHome
+  if ((Run @("-y")) -ne 0) { Fail "install before the extra-block check failed" }
+  $layoutPath = Join-Path $HerdrHome "layouts/farrier.json"
+  $layout = Get-Content -LiteralPath $layoutPath -Raw | ConvertFrom-Json
+  $layout.children += [pscustomobject]@{ id = "extra-test"; type = "block"; content = [pscustomobject]@{ mod = "herdr-extra-test" }; size = [pscustomobject]@{ px = 200 } }
+  $layout.children += [pscustomobject]@{ id = "extra-pane"; type = "block"; content = [pscustomobject]@{ tab = "active"; pane = [pscustomobject]@{ header = [pscustomobject]@{ content = [pscustomobject]@{ mod = "herdr-extra-pane" } } } } }
+  $layout | Add-Member -NotePropertyName floating -NotePropertyValue @([pscustomobject]@{ id = "extra-float"; content = [pscustomobject]@{ mod = "herdr-extra-floating" } }) -Force
+  $layout | Add-Member -NotePropertyName toast -NotePropertyValue "herdr-extra-toast" -Force
+  $layout | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $layoutPath -Encoding UTF8
+  $text = RunOutput @("--update", "-y", "--dry-run", "farrier-layout")
+  foreach ($name in @("herdr-extra-test", "herdr-extra-pane", "herdr-extra-floating", "herdr-extra-toast")) {
+    if ($text -notmatch $name) { Fail "dry run did not name $name" }
+  }
+  if ($text -notmatch "also places mods") { Fail "dry run did not use the plural" }
+  if (-not ((Get-Content -LiteralPath $layoutPath -Raw) -match "herdr-extra-test")) { Fail "dry run wrote the layout" }
+  $real = RunOutput @("--update", "-y", "farrier-layout")
+  if ($real -match "also places") { Fail "real update printed the dry-run note" }
+  Ok "a dry run names blocks, pane headers, floating blocks and toast"
+
+  # ---- a corrupt installed layout does not crash the dry run ----------------
+  $HerdrHome = FreshHome
+  if ((Run @("-y")) -ne 0) { Fail "install before the corrupt-layout check failed" }
+  $layoutPath = Join-Path $HerdrHome "layouts/farrier.json"
+  [IO.File]::WriteAllText($layoutPath, "{broken")
+  $text = RunOutput @("--update", "-y", "--dry-run", "farrier-layout")
+  if ($text -notmatch "could not be read") { Fail "dry run did not say the layout could not be read" }
+  Ok "a corrupt installed layout does not crash the dry run"
 
   # ---- uninstall takes out what it put in, and leaves the rest ---------------
   $HerdrHome = FreshHome

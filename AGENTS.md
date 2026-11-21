@@ -32,7 +32,11 @@ The list lives in `reserved.txt`. Both installers enforce it, and
 - The theme is colors only. It installs, applies and is offered in every layout
   on its own; no mod and no layout may be required to select it.
 - A mod is one folder with one catalogue row. It may use theme colors and shared
-  state, never another Farrier mod's code or files.
+  state, never another Farrier mod's code or files. A copy works wherever a
+  personal layout places it: the panels find their own blocks by mod name in
+  `layout()`, the strip reads no `layout()` node, any block or pane that shows
+  it works, and the theme picked there applies. The farrier layout also places
+  copies; no layout is required.
 - A layout names the mods it shows. Without one, its block is empty; the theme,
   the other blocks and the rest of the window still work. A default theme or
   font from a missing part falls back to Herdr's own.
@@ -96,6 +100,15 @@ and every `colors` key one of the names `theme()` returns.
   rename, so an open Herdr never sees a half-copied mod.
 - Skips what is already identical (`=`), so `--update` touches only what changed
   and never re-applies a layout for nothing.
+- Replaces `layouts/farrier.json` whole. Herdr docks a panel mod it first sees
+  into the shown layout (unless its `mod.json` says `"place": "none"`), so a
+  third-party panel installed while Farrier shows becomes a block of this file.
+  `--dry-run` names every mod the installed file places that this layout does
+  not (`Get-OtherMods` / `other_mods`): blocks, pane and stack headers, floating
+  blocks, the terminal menu and the toast. With no `python3` on POSIX, or an
+  unreadable installed file, it prints that the check was skipped. A real
+  install says nothing. Never merge those blocks: their place is a personal
+  layout the person owns, which `install.tsv` never writes.
 - Each catalogue row installs alone (`--list`, then ids). A layout may name mods
   it shows; a missing one leaves its block empty and the other parts still run.
 - The one destination rename is `themes/farrier.json` →

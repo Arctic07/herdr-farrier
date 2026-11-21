@@ -127,14 +127,46 @@ foreach ($row in $Rows) {
 }
 
 # A layout may reference only its own mods or the ones Herdr ships.
-function Get-ModRefs($node) {
+function Get-ModRefs($node, $root = $true) {
   $found = @()
   if ($null -eq $node) { return $found }
+  if ($node -is [System.Collections.IEnumerable] -and $node -isnot [string]) {
+    foreach ($item in $node) { $found += Get-ModRefs $item $false }
+    return $found
+  }
+  if ($node -isnot [pscustomobject]) { return $found }
   if ($node.content -and $node.content.mod) { $found += $node.content.mod }
-  if ($node.terminal_menu) { $found += $node.terminal_menu }
-  if ($node.children) { foreach ($child in $node.children) { $found += Get-ModRefs $child } }
+  if ($node.type -and ($node.header -is [string]) -and $node.header) { $found += $node.header }
+  if ($root) {
+    if ($node.terminal_menu) { $found += $node.terminal_menu }
+    if ($node.toast) { $found += $node.toast }
+  }
+  foreach ($prop in $node.PSObject.Properties) {
+    if ($prop.Name -eq "props") { continue }
+    $found += Get-ModRefs $prop.Value $false
+  }
   return $found
 }
+# Mods the installed file places that this layout does not: a block Herdr docked
+# when it first saw a mod, one a person added, a pane-header, stack header,
+# floating block, terminal menu or toast. The update replaces the file.
+function Get-OtherMods($written, $ours) {
+  try {
+    $json = Get-Content -LiteralPath $written -Raw -Encoding UTF8 | ConvertFrom-Json
+    $have = @(Get-ModRefs $json)
+  } catch {
+    return [pscustomobject]@{ Ok = $false; Names = @() }
+  }
+  return [pscustomobject]@{ Ok = $true; Names = @($have | Where-Object { $_ -and ($ours -notcontains $_) } | Sort-Object -Unique) }
+}
+function Write-OtherMods($refs) {
+  $list = @($refs | Where-Object { $_ })
+  if ($list.Count -eq 0) { return }
+  $word = if ($list.Count -eq 1) { "mod" } else { "mods" }
+  $names = ($list | ForEach-Object { "'" + $_ + "'" }) -join ", "
+  Write-Host ("    also places " + $word + " " + $names + "; this update replaces the file")
+}
+
 $OwnMods = @($Rows | Where-Object { $_.Kind -eq "mod" } | ForEach-Object { [System.IO.Path]::GetFileName($_.Dest.TrimEnd("/")) })
 foreach ($row in $Rows) {
   if ($row.Kind -ne "layout") { continue }
@@ -317,7 +349,15 @@ foreach ($row in $Chosen) {
   if ($there -and (Get-SourceHash $source) -eq (Get-SourceHash $target)) { Write-Host ("  = " + $row.Dest); continue }
   $changed++
   if ($DryRun) {
-    if ($there) { Write-Host ("  ~ " + $row.Dest + "  (the old one is kept)") }
+    if ($there) {
+      Write-Host ("  ~ " + $row.Dest + "  (the old one is kept)")
+      if ($row.Kind -eq "layout") {
+        $ours = @(Get-ModRefs (Get-Content -LiteralPath $source -Raw -Encoding UTF8 | ConvertFrom-Json))
+        $look = Get-OtherMods $target $ours
+        if ($look.Ok) { Write-OtherMods $look.Names }
+        else { Write-Host "    (the installed layout could not be read: blocks it adds were not named)" }
+      }
+    }
     else { Write-Host ("  + " + $row.Dest) }
     continue
   }

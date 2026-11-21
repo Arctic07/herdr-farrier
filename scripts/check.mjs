@@ -168,10 +168,24 @@ function parseJson(path, report) {
   }
 }
 
-function modRefs(node, out = []) {
-  if (!node) return out;
-  if (node.content?.mod) out.push(node.content.mod);
-  if (node.terminal_menu) out.push(node.terminal_menu);
-  for (const child of node.children ?? []) modRefs(child, out);
+// Every place a layout can name a mod: block content, a pane or stack header,
+// a floating block, the root terminal menu and toast. `props` is data, not a
+// placement, so it is skipped.
+function modRefs(value, out = [], root = true) {
+  if (!value || typeof value !== "object") return out;
+  if (Array.isArray(value)) {
+    for (const item of value) modRefs(item, out, false);
+    return out;
+  }
+  if (value.content?.mod) out.push(value.content.mod);
+  if (value.type && typeof value.header === "string" && value.header) out.push(value.header);
+  if (root) {
+    if (value.terminal_menu) out.push(value.terminal_menu);
+    if (value.toast) out.push(value.toast);
+  }
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "props") continue;
+    modRefs(item, out, false);
+  }
   return out;
 }

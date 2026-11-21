@@ -60,6 +60,21 @@ under the HarmonyOS Sans Fonts License Agreement. The terminals keep a
 monospace font. Herdr loads these fonts at start; restart it once after the
 first install if the window was already open.
 
+### Blocks from other packs
+
+Herdr docks a panel mod it first sees into the layout on screen (unless its
+`mod.json` says `"place": "none"`), so a new panel installed while Farrier
+shows becomes a block of `layouts/farrier.json`; blocks added by hand land
+there too. An update writes this repository's copy of that file, so blocks
+of mods this bundle does not install go with the old one (kept under
+`backup/`). `--dry-run` names them before anything is written: blocks, pane
+and stack headers, floating blocks, the terminal menu and the toast. On POSIX
+that check needs `python3`; without it the dry run says the check was skipped.
+
+Their place is a personal layout: clone one with `layout.clone` (or Duplicate
+layout in the palette), add the block, and `Ctrl+Shift+L` switches back. An
+update never touches that layout.
+
 ## What's inside
 
 | File | What it is |
@@ -96,7 +111,8 @@ bar's **Files** and **Changes** buttons drive the `panel-body` stack's
 `files` and `changes` children; to use those buttons for these panels, make
 those children use `farrier-files` and `farrier-git`, or open the block
 directly. The layout's default theme and UI font come from other parts;
-without them Herdr falls back to its own.
+without them Herdr falls back to its own. All three mods read `theme()` only,
+so they keep working under whichever theme is picked in that layout.
 
 For example, `powershell -ExecutionPolicy Bypass -File install.ps1 farrier-git`
 or `sh install.sh farrier-git` installs only the Changes panel, with no layout
@@ -136,7 +152,8 @@ and keeps it while the installed layout still names it.
 
 - Herdr app 0.1.16 or newer
 - Windows PowerShell 5.1 or POSIX `sh`, nothing else; `python3` is used only if
-  it is already there, to merge keys
+  it is already there, to merge keys and to read JSON (themes, layouts, and the
+  installed layout a dry run compares)
 - For commit messages written by Pi: `pi` on `PATH`, using the model in
   `~/.pi/agent/settings.json`
 

@@ -105,6 +105,57 @@ print(json.load(open(sys.argv[1])).get("preview") or "")
 PY
 }
 
+# Mods the installed file places that this layout does not: a block Herdr docked
+# when it first saw a mod, one a person added, a pane-header, stack header,
+# floating block, terminal menu or toast. The update replaces the file.
+other_mods() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+
+def refs(path):
+    out = []
+
+    def walk(value, root=False):
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+            return
+        if not isinstance(value, dict):
+            return
+        content = value.get("content")
+        if isinstance(content, dict) and content.get("mod"):
+            out.append(content["mod"])
+        header = value.get("header")
+        if value.get("type") and isinstance(header, str) and header:
+            out.append(header)
+        if root:
+            for key in ("terminal_menu", "toast"):
+                if isinstance(value.get(key), str) and value[key]:
+                    out.append(value[key])
+        for key, item in value.items():
+            if key == "props":
+                continue
+            walk(item)
+
+    try:
+        walk(json.load(open(path)), True)
+    except Exception:
+        raise SystemExit(1)
+    return out
+
+print("\n".join(sorted(set(refs(sys.argv[1])) - set(refs(sys.argv[2])))))
+PY
+}
+
+note_other_mods() {
+  [ -n "$1" ] || return 0
+  names=$(printf '%s\n' "$1" | sed "s/^/'/; s/\$/'/" | paste -sd, - | sed 's/,/, /g')
+  count=$(printf '%s\n' "$1" | wc -l | tr -d ' ')
+  word=mods
+  [ "$count" = 1 ] && word=mod
+  echo "    also places $word $names; this update replaces the file"
+}
+
 # ---- validate, before anything is written -----------------------------------
 # A theme named like a layout is that layout's own in Herdr: Settings offers it
 # only there. Farrier's themes stay selectable in every layout.
@@ -386,6 +437,15 @@ for id in $chosen; do
   if [ "$dry" = 1 ]; then
     if [ -e "$dest" ]; then
       echo "  ~ $(field "$id" 4)  (the old one is kept)"
+      if [ "$(field "$id" 2)" = "layout" ]; then
+        if ! has_python; then
+          echo "    (no python3: blocks the installed layout adds were not checked)"
+        elif extra=$(other_mods "$dest" "$src"); then
+          note_other_mods "$extra"
+        else
+          echo "    (the installed layout could not be read: blocks it adds were not named)"
+        fi
+      fi
     else
       echo "  + $(field "$id" 4)"
     fi
