@@ -8,7 +8,7 @@
 // an expected snapshot and reload when the file changes on disk.
 
 import { View, div } from "gpui-kit";
-import { v_flex, InputState, EditorState, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, InputState, TextareaState, EditorState, VirtualListScrollHandle } from "gpui-base";
 import {
   spaces,
   panes,
@@ -37,6 +37,8 @@ import {
   sortTree,
   filterRows,
   findNode,
+  ancestorPaths,
+  nextUnloadedAncestor,
   parseLsFiles,
   parseGitStatus,
   parseGitStatusRecords,
@@ -63,6 +65,7 @@ import {
   buildFindRegExp,
   buildLineStarts,
   cleanError,
+  lineTextAt,
   classifySearchResult,
   findMatches,
   groupMatches,
@@ -78,7 +81,11 @@ import {
   buildRgArgs,
   buildGrepArgs,
   buildGitGrepArgs,
+  blockSearchAnchor,
+  hasLineBreak,
   matchKey,
+  parseSearchFileList,
+  prepareSearchQuery,
 } from "./search-logic.js";
 import { expandReplacement, applyPreserveCase } from "./search-logic.js";
 import {
@@ -103,6 +110,7 @@ const CACHE_DIR = `cache/farrier-files`;
 const MAX_TEXT = 1024 * 1024;
 const READ_FLAGS = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const BUFFER_PREFIX = "farrier.files.buffer:";
+const MAX_BLOCK_CANDIDATES = 80;
 
 function readBuffered(key) {
   try {
@@ -450,6 +458,8 @@ export default class FarrierFiles extends View {
     this.lastTreeClick = { path: "", at: 0 };
     this.lastSearchClick = { key: "", at: 0 };
     this.lastActiveFile = "";
+    this.syncFileToken = null;
+    this.revealToken = null;
     this.pendingCloseTab = null;
     if (this.mode === "file") this.initFile(cx);
     else this.initTree(cx);
@@ -528,7 +538,9 @@ export default class FarrierFiles extends View {
       this.inputFocused = false;
     });
 
-    this.searchInput = InputState.new({ placeholder: "Search files", value: this.search.query });
+    this.searchInput = TextareaState.new({ placeholder: "Search files or paste a block", value: this.search.query, rows: 1 });
+    this.searchInput.set_auto_grow(1, 3);
+    this.searchInput.set_soft_wrap(true);
     this.searchInput.on("change", (_event, cx) => {
       this.search.query = this.searchInput.value();
       this.scheduleSearch(cx);
@@ -669,6 +681,8 @@ export default class FarrierFiles extends View {
     this.findFocus = "query";
     this.findApplied = false;
     this.lastPendingFind = 0;
+    this.pendingFindToken = null;
+    this.syncFileToken = null;
     this.filesWatchPromise = null;
     this.watchedFile = null;
     this.watchedAbs = null;
@@ -691,7 +705,9 @@ export default class FarrierFiles extends View {
       error: null,
     };
 
-    this.findInput = InputState.new({ placeholder: "Find", value: this.find.query });
+    this.findInput = TextareaState.new({ placeholder: "Find", value: this.find.query, rows: 1 });
+    this.findInput.set_auto_grow(1, 3);
+    this.findInput.set_soft_wrap(true);
     this.findInput.on("change", (_event, cx) => {
       this.find.query = this.findInput.value();
       this.find.current = 0;
@@ -879,17 +895,20 @@ export default class FarrierFiles extends View {
 
   restoreExpanded() {
     const saved = shared("farrier.files.open");
-    if (saved && saved.root === this.root && Array.isArray(saved.paths)) {
-      this.expanded = new Set(saved.paths.filter((path) => Boolean(path)));
-    } else {
-      this.expanded = new Set();
+    if (saved && saved.root === this.root) {
+      this.expanded = Array.isArray(saved.paths) ? new Set(saved.paths.filter((path) => Boolean(path))) : new Set();
+      this.selectedPath = typeof saved.selected === "string" && saved.selected ? saved.selected : null;
+      return;
     }
+    this.expanded = new Set();
+    this.selectedPath = null;
   }
 
   persistExpanded() {
     setShared("farrier.files.open", {
       root: this.root,
       paths: [...this.expanded].slice(0, 3000),
+      selected: typeof this.selectedPath === "string" && this.selectedPath ? this.selectedPath : null,
     });
   }
 
@@ -975,8 +994,9 @@ export default class FarrierFiles extends View {
         return;
       }
       if (usedGit) {
+        const wanted = this.selectedPath;
         this.rebuildRows();
-        if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) this.selectedPath = null;
+        if (wanted) this.revealPath(wanted, inner, { clearFilter: false });
         if (this.propSearchPending) {
           this.propSearchPending = false;
           this.scheduleSearch(inner);
@@ -1005,8 +1025,9 @@ export default class FarrierFiles extends View {
           done();
           return;
         }
+        const wanted = this.selectedPath;
         this.rebuildRows();
-        if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) this.selectedPath = null;
+        if (wanted) this.revealPath(wanted, inner, { clearFilter: false });
         if (this.propSearchPending) {
           this.propSearchPending = false;
           this.scheduleSearch(inner);
@@ -1132,6 +1153,76 @@ export default class FarrierFiles extends View {
     if (this.selectedPath && !this.rowByPath.has(this.selectedPath)) {
       this.selectedPath = null;
     }
+  }
+
+  /** Selects `path` in the tree, opening the folders above it and clearing a filter that hides it. */
+  revealPath(path, cx, options = {}) {
+    if (!path || this.mode !== "tree") return;
+    const reveal = {};
+    this.revealToken = reveal;
+    let changed = false;
+    for (const dir of ancestorPaths(path)) {
+      const node = this.nodes ? findNode(this.nodes, dir) : null;
+      if (!node?.dir) continue;
+      if (!this.expanded.has(dir)) {
+        this.expanded.add(dir);
+        changed = true;
+      }
+    }
+    this.selectedPath = path;
+    if (changed || !this.rowByPath.has(path)) this.rebuildRows();
+    this.selectedPath = path;
+    const needsLoad = this.lazy && this.nodes && nextUnloadedAncestor(this.nodes, path);
+    if (needsLoad) {
+      this.revealLazy(path, cx, options, reveal);
+      return;
+    }
+    this.finishReveal(path, cx, options, reveal);
+  }
+
+  revealLazy(path, cx, options, reveal) {
+    const ctx = this.context;
+    const token = this.loadToken;
+    cx.spawn(async (inner) => {
+      try {
+        let guard = 0;
+        while (!this.closed && this.context === ctx && this.revealToken === reveal && guard++ < 64) {
+          for (const dir of ancestorPaths(path)) {
+            const node = findNode(this.nodes, dir);
+            if (node?.dir && !this.expanded.has(dir)) this.expanded.add(dir);
+          }
+          const next = nextUnloadedAncestor(this.nodes, path);
+          if (!next) break;
+          await this.ensureFolder(next, ctx, token, inner);
+          if (this.loadToken !== token || this.closed || this.context !== ctx || this.revealToken !== reveal) return;
+        }
+      } catch {}
+      if (this.closed || this.context !== ctx || this.revealToken !== reveal) return;
+      this.finishReveal(path, inner, options, reveal);
+    });
+  }
+
+  finishReveal(path, cx, options, reveal) {
+    if (reveal !== this.revealToken) return;
+    this.rebuildRows();
+    this.selectedPath = path;
+    let index = this.rowIndexByPath.get(path);
+    if (
+      index === undefined &&
+      options?.clearFilter !== false &&
+      String(this.filterText ?? "").trim() &&
+      this.nodes &&
+      findNode(this.nodes, path)
+    ) {
+      this.filterText = "";
+      this.filterInput?.set_value("");
+      this.rebuildRows();
+      this.selectedPath = path;
+      index = this.rowIndexByPath.get(path);
+    }
+    if (options?.scroll !== false && index !== undefined) this.treeScroll?.scroll_to_item(index, "center");
+    if (options?.persist !== false) this.persistExpanded();
+    cx?.notify();
   }
 
   scheduleFilter(cx) {
@@ -1797,7 +1888,7 @@ export default class FarrierFiles extends View {
 
   scheduleSearch(cx) {
     const token = ++this.searchSeq;
-    const query = String(this.search.query ?? "");
+    const query = prepareSearchQuery(this.search.query);
     if (!query.trim()) {
       this.searchGroups = [];
       this.setSearchRows([]);
@@ -1832,6 +1923,10 @@ export default class FarrierFiles extends View {
     };
   }
 
+  searchQuery() {
+    return prepareSearchQuery(this.search.query);
+  }
+
   async runSearch(cx, token) {
     const ctx = this.context;
     if (!ctx || !this.root) {
@@ -1840,7 +1935,7 @@ export default class FarrierFiles extends View {
       cx.notify();
       return;
     }
-    const query = this.search.query;
+    const query = this.searchQuery();
     const options = this.searchOptions();
     const include = this.search.include;
     const exclude = this.search.exclude;
@@ -1848,6 +1943,8 @@ export default class FarrierFiles extends View {
     const on = this.on;
     let raw = [];
     let result = null;
+    let extraLimited = false;
+    let extraWarning = null;
     let mode = this.rgAvailable;
     if (mode === null) {
       try {
@@ -1867,7 +1964,22 @@ export default class FarrierFiles extends View {
         mode = false;
       }
     }
-    if (mode === false) {
+    if (mode === false && hasLineBreak(query)) {
+      const block = await this.runBlockSearch(cx, token, query, options, include, exclude);
+      if (!block) return;
+      if (block.error) {
+        this.searchLoading = false;
+        this.searchMeta = { error: block.error, total: 0, limited: false };
+        this.searchGroups = [];
+        this.setSearchRows([]);
+        cx.notify();
+        return;
+      }
+      raw = block.matches;
+      result = { code: 0, stdout: "", stderr: "" };
+      extraLimited = block.limited;
+      extraWarning = block.warning;
+    } else if (mode === false) {
       let failure = null;
       try {
         result = await exec("grep", buildGrepArgs(query, options), { cwd: root, on, timeout: 20000 });
@@ -1917,8 +2029,8 @@ export default class FarrierFiles extends View {
     this.searchSelectedMatch = null;
     this.searchMeta = {
       total: grouped.total,
-      limited: grouped.limited || raw.length >= 2000,
-      warning: classified.warning,
+      limited: grouped.limited || raw.length >= 2000 || extraLimited,
+      warning: extraWarning || classified.warning,
       error: null,
     };
     this.searchLoading = false;
@@ -1932,10 +2044,85 @@ export default class FarrierFiles extends View {
     cx.notify();
   }
 
+  async runBlockSearch(cx, token, query, options, include, exclude) {
+    const ctx = this.context;
+    const root = this.root;
+    const on = this.on;
+    const anchor = blockSearchAnchor(query, options.regex);
+    if (!anchor) {
+      return {
+        matches: [],
+        limited: false,
+        warning: null,
+        error: options.regex ? "Regex block search needs ripgrep" : null,
+      };
+    }
+    let files = null;
+    try {
+      const result = await exec("git", ["--no-pager", "grep", "-l", "-I", "-F", "--untracked", ...(options.caseSensitive ? [] : ["-i"]), "-e", anchor], { cwd: root, on, timeout: 20000 });
+      if (result.code === 0) files = parseSearchFileList(result.stdout);
+      else if (result.code === 1) files = [];
+    } catch {}
+    if (files === null) {
+      try {
+        const result = await exec("grep", ["-r", "-l", "-I", "-m", "1", "--exclude-dir=.git", "--exclude-dir=node_modules", "--exclude-dir=dist", "--exclude-dir=build", "-F", ...(options.caseSensitive ? [] : ["-i"]), "--", anchor, "."], { cwd: root, on, timeout: 20000 });
+        if (result.code === 0) files = parseSearchFileList(result.stdout);
+        else if (result.code === 1) files = [];
+      } catch {}
+    }
+    if (files === null) {
+      return { matches: [], limited: false, warning: null, error: "Code-block search needs ripgrep, git or grep" };
+    }
+    files = files.filter((file) => pathMatchesGlobs(file, include, exclude));
+    let limited = false;
+    if (files.length > MAX_BLOCK_CANDIDATES) {
+      files = files.slice(0, MAX_BLOCK_CANDIDATES);
+      limited = true;
+    }
+    const matches = [];
+    for (let at = 0; at < files.length; at += 8) {
+      if (token !== this.searchSeq || this.closed || this.context !== ctx) return null;
+      const batch = files.slice(at, at + 8);
+      const texts = await Promise.all(
+        batch.map((file) => readTextFile(resolveAbsolutePath(root, file), { on }).catch(() => null)),
+      );
+      if (token !== this.searchSeq || this.closed || this.context !== ctx) return null;
+      for (let index = 0; index < batch.length; index += 1) {
+        if (token !== this.searchSeq || this.closed || this.context !== ctx) return null;
+        const text = texts[index];
+        if (text && text.length < MAX_TEXT) {
+          const found = findMatches(text, query, { ...options, cap: Math.max(1, 2000 - matches.length) });
+          if (!found.valid) {
+            return { matches: [], limited, warning: null, error: found.error || "Invalid search" };
+          }
+          const starts = found.matches.length ? buildLineStarts(text) : null;
+          for (const match of found.matches) {
+            if (matches.length >= 2000) break;
+            matches.push({ file: batch[index], ...match, lineText: lineTextAt(starts, text, match.lineIndex) });
+          }
+        }
+        if (matches.length >= 2000) break;
+        await cx.sleep(0);
+      }
+      if (matches.length >= 2000) break;
+    }
+    return {
+      matches,
+      limited,
+      warning: limited
+        ? `Block search checked the first ${MAX_BLOCK_CANDIDATES} files`
+        : options.regex
+          ? "Regex block search used literal candidates"
+          : null,
+      error: null,
+    };
+  }
+
   searchSummaryText() {
     if (!this.searchMeta) return String(this.search.query ?? "").trim() ? "" : "Search the workspace";
     if (this.searchMeta.error) return this.searchMeta.error;
-    return searchSummary(this.searchGroups, this.searchMeta.total ?? 0, { limited: this.searchMeta.limited }) + (this.searchMeta.warning ? " · ended early" : "");
+    const summary = searchSummary(this.searchGroups, this.searchMeta.total ?? 0, { limited: this.searchMeta.limited });
+    return this.searchMeta.warning ? `${summary} · ${this.searchMeta.warning}` : summary;
   }
 
   activateSearchRow(key, cx) {
@@ -1947,7 +2134,7 @@ export default class FarrierFiles extends View {
       if (this.collapsedFiles.has(row.file)) this.collapsedFiles.delete(row.file);
       else this.collapsedFiles.add(row.file);
       this.setSearchRows(searchRows(this.searchGroups, this.collapsedFiles));
-      cx.notify();
+      this.revealPath(row.file, cx);
       return;
     }
     this.searchSelectedFile = row.file;
@@ -1958,7 +2145,7 @@ export default class FarrierFiles extends View {
     this.openFile(row.file, cx, {
       permanent,
       find: {
-        query: this.search.query,
+        query: this.searchQuery(),
         caseSensitive: this.search.caseSensitive,
         wholeWord: this.search.wholeWord,
         regex: this.search.regex,
@@ -2009,7 +2196,7 @@ export default class FarrierFiles extends View {
     const root = this.root;
     const on = this.on;
     const options = this.searchOptions();
-    const query = this.search.query;
+    const query = this.searchQuery();
     const replacement = this.search.replace;
     const preserveCase = this.search.preserveCase;
     const key = tabFileKey(root, selected.file);
@@ -2053,7 +2240,7 @@ export default class FarrierFiles extends View {
     const root = this.root;
     const on = this.on;
     const options = this.searchOptions();
-    const query = this.search.query;
+    const query = this.searchQuery();
     const replacement = this.search.replace;
     const preserveCase = this.search.preserveCase;
     cx.spawn(async (inner) => {
@@ -2209,8 +2396,7 @@ export default class FarrierFiles extends View {
     for (const entry of Object.values(this.pendingOpens)) {
       if (entry.fileKey !== fileKey) continue;
       if (!preview) entry.preview = false;
-      this.selectedPath = path;
-      cx.notify();
+      this.revealPath(path, cx);
       return;
     }
 
@@ -2221,8 +2407,7 @@ export default class FarrierFiles extends View {
       const next = { ...known, preview: preview ? known.preview === true : false, space: space?.id ?? known.space };
       if (next.preview !== known.preview || next.space !== known.space) this.markTab(fileKey, next);
       run("tab.select", { id: known.tabId });
-      this.selectedPath = path;
-      cx.notify();
+      this.revealPath(path, cx);
       return;
     }
 
@@ -2244,9 +2429,8 @@ export default class FarrierFiles extends View {
           preview: false,
           space: space?.id ?? null,
         });
-        this.selectedPath = path;
+        this.revealPath(path, cx);
         this.closePreview(previous, cx, activeTab.id);
-        cx.notify();
         return;
       }
       this.pendingCloseTab = activeTab.id;
@@ -2255,7 +2439,8 @@ export default class FarrierFiles extends View {
     const name = pickTabName(path, [...tabs.map((tab) => tab.name), ...Object.keys(this.pendingOpens)], this.root);
     const closeTab = this.pendingCloseTab;
     this.pendingCloseTab = null;
-    this.selectedPath = path;
+    this.revealPath(path, cx);
+    if (options.find) setShared("farrier.files.pendingFind", { fileKey, find: options.find, timestamp: Date.now() });
     this.pendingOpens[name] = { fileKey, preview, space: space?.id ?? null, previous };
     run("tab.new", { name, mod: MOD, props: tabProps });
     cx.spawn(async (inner) => {
@@ -3069,6 +3254,25 @@ export default class FarrierFiles extends View {
     }
   }
 
+  schedulePendingFind(cx) {
+    if (this.pendingFindToken) return;
+    const pending = shared("farrier.files.pendingFind");
+    if (!pending || pending.fileKey !== tabFileKey(this.root, this.file)) return;
+    const timestamp = Number(pending.timestamp) || 0;
+    if (timestamp === this.lastPendingFind || Date.now() - timestamp > 15000) return;
+    if (!this.code) return;
+    const token = {};
+    this.pendingFindToken = token;
+    cx.spawn(async (inner) => {
+      await inner.sleep(0);
+      if (this.pendingFindToken !== token || this.closed) return;
+      this.pendingFindToken = null;
+      if (!this.panelShown()) return;
+      this.consumePendingFind();
+      inner.notify();
+    });
+  }
+
   consumePendingFind() {
     const pending = shared("farrier.files.pendingFind");
     if (!pending || pending.fileKey !== tabFileKey(this.root, this.file)) return;
@@ -3088,6 +3292,10 @@ export default class FarrierFiles extends View {
     this.refreshFind();
     if (find.line) this.find.current = matchIndexAtLine(this.find.matches, Number(find.line));
     this.setFindMatchSelection(this.find.current, false);
+    const current = shared("farrier.files.pendingFind");
+    if (current && current.fileKey === pending.fileKey && Number(current.timestamp) === timestamp) {
+      setShared("farrier.files.pendingFind", null);
+    }
   }
 
   activeFileForTab(tabId) {
@@ -3108,22 +3316,16 @@ export default class FarrierFiles extends View {
     const activeFile = this.activeFileForTab(activeTab?.id);
     if (activeFile === this.lastActiveFile) return;
     this.lastActiveFile = activeFile;
-    if (!activeFile || !this.nodes || !findNode(this.nodes, activeFile)) return;
+    if (!activeFile) return;
     this.selectedPath = activeFile;
-    const parts = activeFile.split("/");
-    let path = "";
-    let changed = false;
-    for (let index = 0; index < parts.length - 1; index += 1) {
-      path = path ? `${path}/${parts[index]}` : parts[index];
-      const node = findNode(this.nodes, path);
-      if (node?.dir && !this.expanded.has(path)) {
-        this.expanded.add(path);
-        changed = true;
-      }
-    }
-    if (changed) this.rebuildRows();
-    const row = this.rowIndexByPath.get(activeFile);
-    if (row !== undefined) this.treeScroll?.scroll_to_item(row, "center");
+    const token = {};
+    this.syncFileToken = token;
+    cx.spawn(async (inner) => {
+      await inner.sleep(0);
+      if (this.syncFileToken !== token || this.closed) return;
+      this.syncFileToken = null;
+      this.revealPath(activeFile, inner, { clearFilter: false });
+    });
   }
 
   // ---- render ---------------------------------------------------------------
@@ -3138,7 +3340,7 @@ export default class FarrierFiles extends View {
         .child(div().text_size(11.5).text_color(t.dim).child("Farrier Files"));
     }
     if (this.mode === "file") {
-      this.consumePendingFind();
+      this.schedulePendingFind(cx);
       if (!this.panelShown()) this.stopFileWatch();
       else if (this.loaded && !this.loading && !this.watchedFile) this.startFileWatch(cx);
       return renderFile(this, t, cx);

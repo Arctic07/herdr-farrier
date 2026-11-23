@@ -12,6 +12,8 @@ import {
   visibleRows,
   filterRows,
   findNode,
+  ancestorPaths,
+  nextUnloadedAncestor,
   parseLsFiles,
   parseGitStatus,
   parseGitStatusRecords,
@@ -43,6 +45,11 @@ import {
   planFileReplacements,
   byteOffsetToChar,
   buildRgArgs,
+  blockSearchAnchor,
+  matchLineSpan,
+  normalizeQueryLineEndings,
+  parseSearchFileList,
+  prepareSearchQuery,
 } from "../mods/farrier-files/search-logic.js";
 import {
   FILE_NAMES as FILES_NAMES,
@@ -100,6 +107,19 @@ test("paths, targets and names", () => {
   assert.equal(isSvg("shape.svg"), true);
   assert.equal(pickTabName("src/index.js", ["index.js"], "/r"), "src/index.js");
   assert.equal(tabFileKey("/r/", "a.js"), '["/r","a.js"]');
+  assert.deepEqual(ancestorPaths("src/lib/a.ts"), ["src", "src/lib"]);
+  assert.deepEqual(ancestorPaths("README.md"), []);
+  const lazy = buildTree([]).root;
+  lazy.loaded = true;
+  lazy.children = [
+    { name: "src", path: "src", dir: true, loaded: false, children: [] },
+  ];
+  assert.equal(nextUnloadedAncestor(lazy, "src/lib/a.ts"), "src");
+  lazy.children[0].loaded = true;
+  lazy.children[0].children = [{ name: "lib", path: "src/lib", dir: true, loaded: false, children: [] }];
+  assert.equal(nextUnloadedAncestor(lazy, "src/lib/a.ts"), "src/lib");
+  lazy.children[0].children[0].loaded = true;
+  assert.equal(nextUnloadedAncestor(lazy, "src/lib/a.ts"), null);
 });
 
 test("empty pane detection", () => {
@@ -134,6 +154,12 @@ test("tree flattening, filtering and expansion", () => {
 
 test("find: literal, whole word and alternation", () => {
   assert.equal(buildFindRegExp("a.b").source, "a\\.b");
+  assert.equal(buildFindRegExp("alpha\nbeta").source, "alpha\\r?\\nbeta");
+  assert.equal(findMatches("alpha\r\nbeta\n", "alpha\nbeta").matches.length, 1);
+  assert.equal(normalizeQueryLineEndings("a\r\nb\rc"), "a\nb\nc");
+  assert.equal(prepareSearchQuery("\r\nalpha\r\nbeta\r\n\r\n"), "alpha\nbeta");
+  assert.equal(matchLineSpan("a\nb\n"), 2);
+  assert.equal(matchLineSpan("a\nb"), 2);
   assert.deepEqual(findMatches("foo foobar foo", "foo", { wholeWord: true }).matches.map((m) => m.text), ["foo", "foo"]);
   assert.deepEqual(
     findMatches("foo foobar", "foo|foobar", { regex: true, wholeWord: true }).matches.map((m) => m.text),
@@ -172,6 +198,32 @@ test("search output parsing, globs and grouping", () => {
   assert.equal(grouped.groups.length, 2);
   assert.equal(searchRows(grouped.groups, new Set()).length, 4);
   assert.ok(buildRgArgs("needle", { include: "src" }).includes("--glob=**/src/**"));
+  assert.ok(buildRgArgs("needle").includes("--fixed-strings"));
+  const multiline = buildRgArgs("alpha\nbeta", {});
+  assert.ok(multiline.includes("--multiline"));
+  assert.ok(multiline.includes("--regexp"));
+  assert.ok(multiline.includes("alpha\\r?\\nbeta"));
+  assert.equal(multiline.includes("--fixed-strings"), false);
+  assert.equal(multiline[multiline.length - 1], ".");
+  const block = parseRgJson(
+    JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: "src/a.js" },
+        lines: { text: "alpha\nbeta\ngamma\n" },
+        line_number: 10,
+        submatches: [{ start: 6, end: 16 }],
+      },
+    }),
+  );
+  assert.deepEqual(
+    [block[0].line, block[0].column, block[0].endColumn, block[0].lineSpan, block[0].lineText, block[0].text],
+    [11, 0, 4, 2, "beta", "beta\ngamma"],
+  );
+  assert.equal(blockSearchAnchor("\n  alpha\n  longestLine\n\n"), "longestLine");
+  assert.equal(blockSearchAnchor("ERROR:\n\\s+0x[0-9a-f]+", true), "ERROR:");
+  assert.equal(blockSearchAnchor(".*", true), "");
+  assert.deepEqual(parseSearchFileList("./src/a.js\r\nb.js\n"), ["src/a.js", "b.js"]);
 });
 
 test("safe file replacement keeps exact targets", () => {

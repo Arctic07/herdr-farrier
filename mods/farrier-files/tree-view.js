@@ -3,7 +3,7 @@
 // renderer, never to a row.
 
 import { div } from "gpui-kit";
-import { v_flex, h_flex, Input, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, Input, Textarea, Scrollbar, v_virtual_list } from "gpui-base";
 import { contextSegments, replacementPreview } from "./search-logic.js";
 import { formatNumber, splitPathInfo } from "./files-logic.js";
 import { icon, toolButton, textButton, ghostButton, countBadge, sectionHeader, emptyNote } from "./ui.js";
@@ -31,6 +31,22 @@ function filterInput(t, state, placeholder) {
     .border_color(t.border)
     .child(icon("search", t.dim, 12))
     .child(div().flex_1().min_w(0).child(Input.new(state).size_full().text_size(11.5).text_color(t.foreground)));
+}
+
+function blockInput(t, state) {
+  return h_flex()
+    .min_h(28)
+    .flex_none()
+    .px(7)
+    .py(4)
+    .gap(6)
+    .items_center()
+    .rounded(7)
+    .bg(t.input)
+    .border_1()
+    .border_color(t.border)
+    .child(icon("search", t.dim, 12))
+    .child(div().flex_1().min_w(0).child(Textarea.new(state).w_full().text_size(11.5).text_color(t.foreground)));
 }
 
 export function renderTreePane(view, t, cx) {
@@ -270,7 +286,7 @@ export function renderSearchSection(view, t, cx) {
       .child(
         toolButton(t, "farrier-files-search-replace-toggle", view.search.replaceOpen ? "chevron-down" : "chevron-right", t.dim, view.search.replaceOpen ? "Hide replace" : "Show replace", (c) => view.toggleSearchReplace(c), { size: 20, iconSize: 10 }),
       )
-      .child(div().flex_1().min_w(0).child(filterInput(t, view.searchInput, "Search files")))
+      .child(div().flex_1().min_w(0).child(blockInput(t, view.searchInput)))
   );
 
   section = section.child(
@@ -336,7 +352,7 @@ export function renderSearchSection(view, t, cx) {
           .truncate()
           .text_size(10.5)
           .text_color(view.searchMeta?.error ? t.blocked : t.dim)
-          .child(view.searchMeta?.error || view.searchMeta?.warning || view.searchSummaryText()),
+          .child(view.searchMeta?.error || view.searchSummaryText()),
       )
       .when(Boolean(view.searchSelectedFile), (e) =>
         e.child(
@@ -459,6 +475,16 @@ function searchRow(view, row, t) {
               .child(segment.text.replace(/\s+/g, " ")),
           ),
         ),
+    )
+    .when(Number(match.lineSpan) > 1, (e) =>
+      e.child(
+        div()
+          .flex_none()
+          .text_size(9.5)
+          .text_color(t.dim)
+          .tooltip(`${match.lineSpan} lines`)
+          .child(`${match.lineSpan}L`),
+      ),
     )
     .when(Boolean(preview), (e) =>
       e.child(

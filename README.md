@@ -9,8 +9,8 @@ says how many agents wait on you, work, or finished while you looked elsewhere.
 The **Changes** button in the tab bar opens a Changes panel: staged files,
 branches, stashes, a push/pull/fetch menu and a commit box that can use Pi to
 write the message. The **Files** button opens a repository tree with workspace
-search and replace, plus a file tab with editing, find and Markdown/image/CSV
-previews. Both panels share one file-type icon vocabulary, and a file row can
+search (including pasted multi-line code) and replace, plus a file tab with
+editing, find and Markdown/image/CSV previews. Both panels share one file-type icon vocabulary, and a file row can
 be dragged into a terminal as its path.
 
 ![Farrier](layouts/farrier.svg)

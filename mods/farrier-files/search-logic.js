@@ -21,13 +21,33 @@ export function escapeRegExp(text) {
   return String(text ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Turns pasted CRLF and lone CR line endings into the LF the editor uses. */
+export function normalizeQueryLineEndings(query) {
+  return String(query ?? "").replace(/\r\n?/g, "\n");
+}
+
+/** A pasted block usually carries blank first or last lines; they are not part of the code. */
+export function prepareSearchQuery(query) {
+  return normalizeQueryLineEndings(query).replace(/^\n+/, "").replace(/\n+$/, "");
+}
+
+export function hasLineBreak(query) {
+  return normalizeQueryLineEndings(query).includes("\n");
+}
+
+/** A literal or regex body whose line breaks match LF and CRLF files alike. */
+export function multilinePattern(query, regex = false) {
+  const body = regex ? normalizeQueryLineEndings(query) : escapeRegExp(normalizeQueryLineEndings(query));
+  return body.replace(/\n/g, "\\r?\\n");
+}
+
 export function buildFindRegExp(query, options = {}) {
   const opts = normalizeFindOptions(options);
-  const raw = typeof query === "string" ? query : "";
+  const raw = normalizeQueryLineEndings(typeof query === "string" ? query : "");
   if (!raw.length) {
     return { empty: true, valid: true, error: null, source: "", flags: "", regex: null, wholeWord: opts.wholeWord };
   }
-  const body = opts.regex ? raw : escapeRegExp(raw);
+  const body = (opts.regex ? raw : escapeRegExp(raw)).replace(/\n/g, "\\r?\\n");
   // A capture group around the body lets whole-word mode keep alternations:
   // `foo|foobar` can still match `foobar` when `foo` stops at a word boundary.
   const source = opts.wholeWord ? `(?:^|\\W)(${body})(?=\\W|$)` : body;
@@ -79,6 +99,21 @@ export function offsetToLineColumn(lineStarts, index) {
   return { line: line + 1, column: index - lineStarts[line], lineIndex: line };
 }
 
+export function lineTextAt(lineStarts, text, lineIndex) {
+  const start = lineStarts[lineIndex];
+  if (start === undefined) return "";
+  const end = lineIndex + 1 < lineStarts.length ? lineStarts[lineIndex + 1] - 1 : text.length;
+  return text.slice(start, end).replace(/\r$/, "");
+}
+
+/** How many source lines a match paints, ignoring a newline the match ends on. */
+export function matchLineSpan(text) {
+  const body = String(text ?? "");
+  if (!body) return 1;
+  const lines = body.split("\n").length;
+  return body.endsWith("\n") ? Math.max(1, lines - 1) : lines;
+}
+
 export function findMatches(text, query, options = {}) {
   const opts = normalizeFindOptions(options);
   const built = buildFindRegExp(query, opts);
@@ -110,6 +145,7 @@ export function findMatches(text, query, options = {}) {
       continue;
     }
     const at = offsetToLineColumn(starts, start);
+    const span = matchLineSpan(source.slice(start, end));
     matches.push({
       start,
       end,
@@ -119,6 +155,7 @@ export function findMatches(text, query, options = {}) {
       column: at.column,
       endColumn: at.column + (end - start),
       lineIndex: at.lineIndex,
+      lineSpan: span,
       groups,
     });
     if (matches.length >= opts.cap) break;
@@ -399,8 +436,84 @@ function expandRgGlob(glob) {
   return [`**/${glob}/**`, `**/${glob}`];
 }
 
+export function blockSearchAnchor(query, regex = false) {
+  if (regex) return regexLiteralAnchor(query);
+  let anchor = "";
+  for (const line of prepareSearchQuery(query).split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length > anchor.length) anchor = trimmed;
+  }
+  return anchor;
+}
+
+/** The longest literal run in a regex, for a cheap candidate prefilter. */
+function regexLiteralAnchor(query) {
+  let best = "";
+  for (const line of prepareSearchQuery(query).split("\n")) {
+    let run = "";
+    let inClass = false;
+    const consider = () => {
+      const text = run.trim();
+      if (text.length > best.length) best = text;
+      run = "";
+    };
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      if (inClass) {
+        if (char === "\\") index += 1;
+        else if (char === "]") {
+          inClass = false;
+          consider();
+        }
+        continue;
+      }
+      if (char === "\\") {
+        const next = line[index + 1];
+        if (!next) {
+          consider();
+          break;
+        }
+        if (next === "u" || next === "x") {
+          consider();
+          index += next === "u" ? 5 : 3;
+        } else if (/[sSdDwWbBnrtfvpP0-9]/.test(next)) {
+          consider();
+          index += 1;
+        } else {
+          run += next;
+          index += 1;
+        }
+        continue;
+      }
+      if (char === "[") {
+        inClass = true;
+        consider();
+        continue;
+      }
+      if ("^$.*+?(){}|".includes(char)) {
+        consider();
+        continue;
+      }
+      run += char;
+    }
+    consider();
+  }
+  return best;
+}
+
+/** Paths printed one per line by `git grep -l` or `grep -rl`. */
+export function parseSearchFileList(stdout) {
+  const out = [];
+  for (const raw of String(stdout ?? "").split("\n")) {
+    const path = raw.replace(/\r$/, "").replace(/\\/g, "/").replace(/^[.][/]/, "");
+    if (path.trim()) out.push(path);
+  }
+  return out;
+}
+
 export function buildRgArgs(query, options = {}) {
   const opts = normalizeFindOptions(options);
+  const multiline = hasLineBreak(query);
   const args = [
     "--json",
     "--line-number",
@@ -421,10 +534,14 @@ export function buildRgArgs(query, options = {}) {
   for (const glob of parseGlobList(options.exclude)) {
     for (const variant of expandRgGlob(glob)) args.push(`--glob=!${variant}`);
   }
-  if (!opts.regex) args.push("--fixed-strings");
   if (opts.wholeWord) args.push("--word-regexp");
   args.push(opts.caseSensitive ? "--case-sensitive" : "--ignore-case");
-  args.push("--", String(query ?? ""));
+  if (multiline) {
+    args.push("--multiline", "--crlf", "--regexp", multilinePattern(query, opts.regex), "--", ".");
+  } else {
+    if (!opts.regex) args.push("--fixed-strings");
+    args.push("--", String(query ?? ""));
+  }
   return args;
 }
 
@@ -481,22 +598,32 @@ export function parseRgJson(stdout, options = {}) {
     if (event?.type !== "match" || !event.data) continue;
     const path = String(event.data.path?.text ?? "").replace(/\\/g, "/").replace(/^\.\//, "");
     if (!path) continue;
-    const lineText = String(event.data.lines?.text ?? "").replace(/\r?\n$/, "");
+    const block = String(event.data.lines?.text ?? "");
+    const blockStarts = buildLineStarts(block);
     const lineNo = Number(event.data.line_number) || 1;
     const submatches = Array.isArray(event.data.submatches) ? event.data.submatches : [];
     for (const sub of submatches) {
       if (matches.length >= cap) break;
-      const start = byteOffsetToChar(lineText, Number(sub.start) || 0);
-      const end = byteOffsetToChar(lineText, Number(sub.end) || 0);
+      const start = byteOffsetToChar(block, Number(sub.start) || 0);
+      const end = byteOffsetToChar(block, Number(sub.end) || 0);
       if (end <= start) continue;
+      const at = offsetToLineColumn(blockStarts, start);
+      const last = offsetToLineColumn(blockStarts, Math.max(start, end));
+      const startLine = lineNo + at.lineIndex;
+      const lineEnd = at.lineIndex + 1 < blockStarts.length ? blockStarts[at.lineIndex + 1] - 1 : block.length;
+      const lineText = lineTextAt(blockStarts, block, at.lineIndex);
+      const span = matchLineSpan(block.slice(start, end));
+      const endLine = startLine + span - 1;
       matches.push({
         file: path,
-        line: lineNo,
-        column: start,
-        endColumn: end,
+        line: startLine,
+        column: at.column,
+        endColumn: span > 1 || end > lineEnd ? lineText.length : last.column,
         length: end - start,
-        text: lineText.slice(start, end),
+        text: block.slice(start, end),
         lineText,
+        lineSpan: span,
+        endLine,
       });
     }
   }
@@ -526,6 +653,7 @@ export function parseGrepOutput(stdout, query, options = {}) {
         length: hit.length,
         text: hit.text,
         lineText,
+        lineSpan: 1,
       });
     }
   }

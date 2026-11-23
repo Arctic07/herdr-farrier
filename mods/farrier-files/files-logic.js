@@ -325,6 +325,26 @@ export function setTreeChildren(root, path, entries) {
   return true;
 }
 
+export function ancestorPaths(path) {
+  const parts = normalizePath(path).replace(/^\/+/, "").split("/").filter(Boolean);
+  const out = [];
+  let at = "";
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    at = at ? `${at}/${parts[index]}` : parts[index];
+    out.push(at);
+  }
+  return out;
+}
+
+export function nextUnloadedAncestor(root, path) {
+  if (!root) return null;
+  for (const dir of ancestorPaths(path)) {
+    const node = findNode(root, dir);
+    if (node?.dir && !node.loaded) return dir;
+  }
+  return null;
+}
+
 export function findNode(root, path) {
   if (!path) return root;
   let node = root;

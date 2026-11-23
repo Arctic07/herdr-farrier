@@ -2,7 +2,7 @@
 // widget. Row handlers stay outside virtual renderers.
 
 import { div, image } from "gpui-kit";
-import { v_flex, h_flex, Input, Editor, Scrollbar, v_virtual_list, TextView } from "gpui-base";
+import { v_flex, h_flex, Input, Textarea, Editor, Scrollbar, v_virtual_list, TextView } from "gpui-base";
 import { contextSegments } from "./search-logic.js";
 import { formatNumber, splitPathInfo } from "./files-logic.js";
 import { icon, toolButton, textButton, ghostButton, countBadge } from "./ui.js";
@@ -511,11 +511,11 @@ export function renderFindPanel(view, t, cx) {
         .child(
           toolButton(t, "farrier-files-find-replace-toggle", view.find.replaceOpen ? "chevron-down" : "chevron-right", t.dim, "Replace row", (c) => view.toggleFindReplace(c), { size: 20, iconSize: 10 }),
         )
-        .child(div().flex_1().min_w(0).child(filterField(t, view.findInput, "Find")),
+        .child(div().flex_1().min_w(0).child(filterField(t, view.findInput, "Find", null, false, true)),
         )
         .child(div().flex_none().max_w(92).truncate().text_size(10).text_color(view.find.valid ? t.dim : t.blocked).child(counterText(view)))
-        .child(toolButton(t, "farrier-files-find-prev", "arrow-up", t.dim, "Previous match (Shift+Enter)", (c) => view.stepFind(-1, c), { size: 20, iconSize: 11 }))
-        .child(toolButton(t, "farrier-files-find-next", "arrow-down", t.dim, "Next match (Enter)", (c) => view.stepFind(1, c), { size: 20, iconSize: 11 }))
+        .child(toolButton(t, "farrier-files-find-prev", "arrow-up", t.dim, "Previous match (Ctrl+Shift+Enter)", (c) => view.stepFind(-1, c), { size: 20, iconSize: 11 }))
+        .child(toolButton(t, "farrier-files-find-next", "arrow-down", t.dim, "Next match (Ctrl+Enter)", (c) => view.stepFind(1, c), { size: 20, iconSize: 11 }))
         .child(toolButton(t, "farrier-files-find-close", "close", t.dim, "Close find (Esc)", (c) => view.closeFind(c), { size: 20, iconSize: 10 }),
         ),
     )
@@ -570,9 +570,9 @@ export function renderFindPanel(view, t, cx) {
   return panel;
 }
 
-function filterField(t, state, placeholder, width = null, replace = false) {
+function filterField(t, state, placeholder, width = null, replace = false, multiline = false) {
   let row = h_flex()
-    .h(26)
+    .min_h(26)
     .flex_none()
     .px(7)
     .gap(6)
@@ -581,8 +581,18 @@ function filterField(t, state, placeholder, width = null, replace = false) {
     .bg(t.input)
     .border_1()
     .border_color(t.border)
+    .when(!multiline, (e) => e.h(26))
     .child(icon(replace ? "wrap" : "search", t.dim, 11))
-    .child(div().flex_1().min_w(0).child(Input.new(state).size_full().text_size(11.5).text_color(t.foreground)));
+    .child(
+      div()
+        .flex_1()
+        .min_w(0)
+        .child(
+          multiline
+            ? Textarea.new(state).w_full().text_size(11.5).text_color(t.foreground)
+            : Input.new(state).size_full().text_size(11.5).text_color(t.foreground),
+        ),
+    );
   if (width) row = row.w(width);
   return row;
 }
@@ -623,6 +633,9 @@ function findRow(view, match, index, t) {
               .child(segment.text.replace(/\s+/g, " ")),
           ),
         ),
+    )
+    .when(Number(match.lineSpan) > 1, (e) =>
+      e.child(div().flex_none().text_size(9).text_color(t.dim).child(`${match.lineSpan}L`)),
     );
 }
 

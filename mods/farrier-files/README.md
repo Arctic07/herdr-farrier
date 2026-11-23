@@ -43,6 +43,10 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
   tab also offers **Keep open**. Rename and delete ask first; a rename keeps
   open folders where it can. Rows carry their absolute path as a drag payload.
   File types use the same icons as the Git panel.
+- A Search result selects its file in the tree too: its ancestors open, a filter
+  that hides it clears, and the row scrolls into view. Opening a match opens the
+  file and selects it; a file header selects it while folding its matches. The
+  selection survives a Files tab being closed and reopened.
 - A single click opens a temporary preview tab. Double-clicking the same row
   (or **Keep open**, or making an edit) makes it permanent. Opening another
   preview replaces the previous one; unsaved edits and split tabs promote
@@ -65,14 +69,20 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
 - Results appear as you type after a short debounce, off the UI thread, with a
   token that discards stale runs. `Aa` is match case, `ab` is whole word, `.*` is
   regular expression.
+- The query box accepts pasted code with line breaks and grows to three rows.
+  The whole block is searched across lines, so a line break in the query matches
+  `LF` and `CRLF` files; a result row marks a multi-line hit with its line count.
+  `ripgrep` handles this when installed; without it, `git grep` or `grep` finds
+  candidate files and the block is verified in memory.
 - Include and exclude lists accept comma-separated globs such as `src/**` or
   `node_modules`. Bare names match at any depth.
 - `ripgrep` is used when installed and respects `.gitignore`; otherwise the panel
   falls back to `grep` and re-matches each candidate line. Results cap at 2,000
   matches and 200 files and say `(limited)` when they hit the cap.
-- Clicking a result opens the file with the query and line in its find widget;
-  an already open tab receives the same handoff. A file header folds its
-  matches; clicking it also selects that file for **Replace in file**. A match
+- Clicking a result opens the file with the query and line in its find widget
+  and reveals the same file in the tree; an already open tab receives the same
+  handoff. A file header folds its matches; clicking it also selects that file
+  for **Replace in file**. A match
   can be replaced or dismissed from the action row while replace is open; the
   result row previews the replacement inline.
 - **Replace** opens a replace field and an `AB` preserve-case toggle.
@@ -86,9 +96,11 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
 
 - **Editing**: syntax highlighting from the active theme, line numbers, folding,
   soft wrap, `Ctrl+S` save, dirty dot, and a copy button. `Ctrl+F` opens find,
-  `Ctrl+H` opens find with the replace row.
+  `Ctrl+H` opens find with the replace row. The find box also accepts a pasted
+  block; `Ctrl+Enter` moves to the next match and `Ctrl+Shift+Enter` to the
+  previous one.
 - **Find and replace**: `Aa` / `ab` / `.*`, match list with context, previous/next
-  (`↑` / `↓`, `Enter` / `Shift+Enter`, `F3` / `Shift+F3`), replace one, replace all, and a
+  (`Ctrl+Shift+Enter` / `Ctrl+Enter`, `F3` / `Shift+F3`), replace one, replace all, and a
   small in-memory undo for replacements (`Ctrl+Z` while find is open).
 - **Previews**: Markdown renders in a readable column; SVG renders on a light
   canvas with zoom; CSV/TSV renders as a table with quoted fields and delimiter
