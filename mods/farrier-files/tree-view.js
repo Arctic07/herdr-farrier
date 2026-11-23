@@ -417,12 +417,24 @@ export function renderSearchSection(view, t, cx) {
   return section;
 }
 
+function withPathDrag(view, file, el) {
+  if (!view.root || !file) return el;
+  try {
+    return el.drag_paths([view.absoluteFor(file)], view.on ? { on: view.on } : undefined);
+  } catch {
+    return el;
+  }
+}
+
 function searchRow(view, row, t) {
   if (row.kind === "file") {
     const { base, dir } = splitPathInfo(row.file);
     const kind = view.kindFor(row.file);
     const selected = view.searchSelectedFile === row.file;
-    return h_flex()
+    return withPathDrag(
+      view,
+      row.file,
+      h_flex()
       .id(`farrier-files-search-file-${row.file}`)
       .w_full()
       .h(28)
@@ -438,7 +450,8 @@ function searchRow(view, row, t) {
       .child(icon(kind.icon, t[kind.tone] ?? t.muted, 13))
       .child(div().min_w(0).max_w(150).truncate().text_size(11.5).font_medium().child(base))
       .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(dir ? `${dir}` : ""))
-      .child(countBadge(t, String(row.count)));
+      .child(countBadge(t, String(row.count))),
+    );
   }
   const match = row.match;
   const segments = contextSegments(match.lineText ?? match.text, match.column, match.endColumn ?? match.column + match.length);
@@ -446,7 +459,10 @@ function searchRow(view, row, t) {
     view.search.replaceOpen && String(view.search.replace ?? "")
       ? replacementPreview(view.search.replace, match, { regex: view.search.regex, preserveCase: view.search.preserveCase })
       : "";
-  return h_flex()
+  return withPathDrag(
+    view,
+    row.file,
+    h_flex()
     .id(`farrier-files-search-match-${row.key}`)
     .w_full()
     .h(24)
@@ -496,7 +512,8 @@ function searchRow(view, row, t) {
           .text_color(t.done)
           .child(`→ ${preview.replace(/\s+/g, " ")}`),
       ),
-    );
+    ),
+  );
 }
 
 function menuItem(t, id, label, onClick, view, options = {}) {

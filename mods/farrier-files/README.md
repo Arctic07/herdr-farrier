@@ -74,11 +74,17 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
   `LF` and `CRLF` files; a result row marks a multi-line hit with its line count.
   `ripgrep` handles this when installed; without it, `git grep` or `grep` finds
   candidate files and the block is verified in memory.
+- Each folder keeps its own search: query, include and exclude lists, replace
+  text, and collapsed result files. Switching away and back restores that search
+  and reruns it against its own tree; a folder with no saved search starts empty.
 - Include and exclude lists accept comma-separated globs such as `src/**` or
   `node_modules`. Bare names match at any depth.
 - `ripgrep` is used when installed and respects `.gitignore`; otherwise the panel
   falls back to `grep` and re-matches each candidate line. Results cap at 2,000
   matches and 200 files and say `(limited)` when they hit the cap.
+- Search result headers and match rows carry the file's absolute path as a
+  drag payload, so they can be dropped into a terminal or agent pane just like
+  a tree row.
 - Clicking a result opens the file with the query and line in its find widget
   and reveals the same file in the tree; an already open tab receives the same
   handoff. A file header folds its matches; clicking it also selects that file
@@ -95,7 +101,8 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
 ## The file tab
 
 - **Editing**: syntax highlighting from the active theme, line numbers, folding,
-  soft wrap, `Ctrl+S` save, dirty dot, and a copy button. `Ctrl+F` opens find,
+  soft wrap, `Ctrl+S` save, dirty dot, and a copy button. `Ctrl+F` opens find
+  and seeds the selected text, even when find already has an older query;
   `Ctrl+H` opens find with the replace row. The find box also accepts a pasted
   block; `Ctrl+Enter` moves to the next match and `Ctrl+Shift+Enter` to the
   previous one.

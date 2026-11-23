@@ -507,6 +507,8 @@ export default class FarrierFiles extends View {
     this.searchMeta = null;
     this.searchLoading = false;
     this.searchSeq = 0;
+    this.searchByContext = new Map();
+    this.searchSyncToken = null;
     this.collapsedFiles = new Set();
     this.searchSelectedFile = null;
     this.searchSelectedMatch = null;
@@ -594,6 +596,7 @@ export default class FarrierFiles extends View {
     });
 
     this.propSearchPending = false;
+    this.requestedSearch = false;
     this.searchWantReplaceDialog = false;
     const requestedSearch = commandProps().search;
     if (requestedSearch && typeof requestedSearch === "object") {
@@ -612,6 +615,7 @@ export default class FarrierFiles extends View {
       this.includeInput.set_value(this.search.include);
       this.excludeInput.set_value(this.search.exclude);
       this.propSearchPending = Boolean(this.search.query.trim());
+      this.requestedSearch = this.propSearchPending;
       this.searchWantReplaceDialog = requestedSearch.replaceDialog === true;
     }
 
@@ -849,7 +853,10 @@ export default class FarrierFiles extends View {
     }
     const place = location();
     const key = JSON.stringify(place);
+    const keepSearch = this.requestedSearch;
     if (!place.cwd) {
+      if (!keepSearch) this.saveSearchState();
+      this.clearSearchResults();
       this.stopWatch();
       this.context = { key, ...place };
       this.root = "";
@@ -858,10 +865,13 @@ export default class FarrierFiles extends View {
       this.clearRows();
       this.error = "No folder";
       this.loading = false;
+      if (!keepSearch) this.applySearchState({}, key, cx);
       requestRender(cx);
       return;
     }
     if (!this.context || this.context.key !== key) {
+      if (!keepSearch) this.saveSearchState();
+      this.clearSearchResults();
       this.stopWatch();
       this.context = { key, ...place };
       this.root = place.cwd;
@@ -879,10 +889,7 @@ export default class FarrierFiles extends View {
       this.menu = null;
       this.menuTarget = null;
       this.dialog = null;
-      this.searchGroups = [];
-      this.setSearchRows([]);
-      this.searchMeta = null;
-      this.searchSelectedFile = null;
+      if (!keepSearch) this.applySearchState(this.searchByContext.get(key) ?? {}, key, cx);
       this.restoreExpanded();
       this.loadRoot(cx);
       return;
@@ -891,6 +898,55 @@ export default class FarrierFiles extends View {
       this.stale = false;
       this.loadRoot(cx);
     }
+  }
+
+  clearSearchResults() {
+    this.searchSeq += 1;
+    this.searchGroups = [];
+    this.setSearchRows([]);
+    this.searchMeta = null;
+    this.searchSelectedFile = null;
+    this.searchSelectedMatch = null;
+    this.searchLoading = false;
+  }
+
+  saveSearchState() {
+    if (!this.context?.key || !this.root) return;
+    const state = {
+      query: this.search.query,
+      include: this.search.include,
+      exclude: this.search.exclude,
+      replace: this.search.replace,
+      collapsedFiles: [...this.collapsedFiles],
+    };
+    if (!state.query && !state.include && !state.exclude && !state.replace && !state.collapsedFiles.length) return;
+    this.searchByContext.set(this.context.key, state);
+    while (this.searchByContext.size > 32) {
+      this.searchByContext.delete(this.searchByContext.keys().next().value);
+    }
+  }
+
+  applySearchState(state, key, cx) {
+    this.search.query = String(state?.query ?? "");
+    this.search.include = String(state?.include ?? "");
+    this.search.exclude = String(state?.exclude ?? "");
+    this.search.replace = String(state?.replace ?? "");
+    this.collapsedFiles = new Set(state?.collapsedFiles ?? []);
+    this.lastSearchClick = { key: "", at: 0 };
+    this.searchWantReplaceDialog = false;
+    this.propSearchPending = Boolean(this.search.query.trim());
+    const token = {};
+    this.searchSyncToken = token;
+    cx?.spawn(async (inner) => {
+      await inner.sleep(0);
+      if (this.searchSyncToken !== token || this.closed || this.context?.key !== key) return;
+      this.searchSyncToken = null;
+      this.searchInput?.set_value(this.search.query);
+      this.includeInput?.set_value(this.search.include);
+      this.excludeInput?.set_value(this.search.exclude);
+      this.replaceInput?.set_value(this.search.replace);
+      inner.notify();
+    });
   }
 
   restoreExpanded() {
@@ -999,6 +1055,7 @@ export default class FarrierFiles extends View {
         if (wanted) this.revealPath(wanted, inner, { clearFilter: false });
         if (this.propSearchPending) {
           this.propSearchPending = false;
+          this.requestedSearch = false;
           this.scheduleSearch(inner);
         }
         this.loading = false;
@@ -1030,6 +1087,7 @@ export default class FarrierFiles extends View {
         if (wanted) this.revealPath(wanted, inner, { clearFilter: false });
         if (this.propSearchPending) {
           this.propSearchPending = false;
+          this.requestedSearch = false;
           this.scheduleSearch(inner);
         }
         this.loading = false;
@@ -3025,17 +3083,18 @@ export default class FarrierFiles extends View {
     }
     this.find.open = true;
     this.find.replaceOpen = options.replace === true || this.find.replaceOpen;
-    this.persistFindPrefs();
-    if (!this.find.query) {
+    if (options.seedSelection !== false) {
       const selection = this.code?.selected_range();
       if (selection && selection.end > selection.start && selection.end - selection.start < 300) {
-        const selected = this.text.slice(selection.start, selection.end);
-        if (!selected.includes("\n")) {
+        const selected = prepareSearchQuery((this.code?.value() ?? this.text).slice(selection.start, selection.end));
+        if (selected) {
           this.find.query = selected;
+          this.find.current = 0;
           this.findInput.set_value(selected);
         }
       }
     }
+    this.persistFindPrefs();
     this.refreshFind();
     if (this.find.matches.length && this.find.current >= 0) this.setFindMatchSelection(this.find.current, false);
     cx.notify();
@@ -3224,7 +3283,7 @@ export default class FarrierFiles extends View {
     }
     if (key === "f3") {
       if (this.find.open) this.stepFind(mods.shift ? -1 : 1, cx);
-      else this.openFind(cx);
+      else this.openFind(cx, { seedSelection: false });
       cx.stop_propagation();
       return;
     }
