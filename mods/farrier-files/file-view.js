@@ -642,9 +642,29 @@ function findRow(view, match, index, t) {
 function renderFileDialog(view, t, cx) {
   const dialog = view.dialog;
   if (!dialog) return null;
+  const conflict = dialog.kind === "save-conflict";
+  const title = conflict ? "File changed on disk" : dialog.kind === "reload" ? "Reload?" : "Discard edits?";
+  const body = conflict
+    ? `${splitPathInfo(view.file).base} changed outside Herdr. Your draft is still here. Overwrite the newer file, reload it, or keep editing.`
+    : "Discard unsaved edits and read the file from disk.";
+  let actions = h_flex()
+    .gap(6)
+    .justify_end()
+    .child(textButton(t, "farrier-files-file-dialog-cancel", "Cancel", (c) => view.closeDialog(c)))
+    .child(
+      textButton(t, "farrier-files-file-dialog-confirm", "Reload", (c) => view.confirmReload(c), {
+        danger: conflict,
+        primary: !conflict,
+      }),
+    );
+  if (conflict) {
+    actions = actions.child(
+      textButton(t, "farrier-files-file-dialog-overwrite", "Overwrite", (c) => view.confirmSaveConflict(c), { primary: true }),
+    );
+  }
   const card = v_flex()
     .id("farrier-files-file-dialog")
-    .w(330)
+    .w(conflict ? 390 : 330)
     .p(14)
     .gap(10)
     .rounded(11)
@@ -653,15 +673,9 @@ function renderFileDialog(view, t, cx) {
     .border_color(t.border)
     .shadow_lg()
     .on_mouse_down("left", (_event, c) => c.stop_propagation())
-    .child(div().text_size(12.5).font_semibold().child(dialog.kind === "reload" ? "Reload?" : "Discard edits?"))
-    .child(div().text_size(10.5).text_color(t.dim).child("Discard unsaved edits and read the file from disk."))
-    .child(
-      h_flex()
-        .gap(6)
-        .justify_end()
-        .child(textButton(t, "farrier-files-file-dialog-cancel", "Cancel", (c) => view.closeDialog(c)))
-        .child(textButton(t, "farrier-files-file-dialog-confirm", "Reload", (c) => view.confirmReload(c), { primary: true })),
-    );
+    .child(div().text_size(12.5).font_semibold().child(title))
+    .child(div().text_size(10.5).text_color(t.dim).child(body))
+    .child(actions);
   return div()
     .absolute()
     .inset_0()

@@ -117,8 +117,10 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
   `Ctrl`+wheel zoom. Tables keep their header and row numbers while scrolling.
   Markdown, SVG and CSV get a **Preview / Code** switch.
 - **Live reload**: the file's folder is watched. A change on disk reloads the
-  tab, unless the tab has unsaved edits, in which case a warning appears and
-  saving still detects the stale snapshot.
+  tab, unless the tab has unsaved edits, in which case a warning appears. Saving
+  a stale draft opens a conflict card: **Overwrite** writes the draft over the
+  newer file, **Reload** discards the draft, and **Cancel** keeps editing. Nothing
+  is overwritten until one is chosen.
 - **Split**: the header split buttons open the same file in a right or down
   split. `Ctrl+\` splits right and `Ctrl+Shift+\` splits down. `Alt+Z` toggles
   soft wrap.

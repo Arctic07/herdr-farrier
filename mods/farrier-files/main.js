@@ -663,6 +663,7 @@ export default class FarrierFiles extends View {
     this.lineCount = 0;
     this.dirty = false;
     this.saving = false;
+    this.saveConflict = null;
     this.loading = false;
     this.loaded = false;
     this.binary = false;
@@ -1539,6 +1540,7 @@ export default class FarrierFiles extends View {
 
   closeDialog(cx) {
     this.dialog = null;
+    this.saveConflict = null;
     cx.notify();
   }
 
@@ -2806,7 +2808,7 @@ export default class FarrierFiles extends View {
   }
 
   save(cx) {
-    if (!this.canEdit() || this.saving || !this.dirty) return;
+    if (!this.canEdit() || this.saving || !this.dirty || this.saveConflict) return;
     const token = {};
     this.reloadToken = token;
     const abs = this.abs;
@@ -2819,6 +2821,53 @@ export default class FarrierFiles extends View {
       try {
         if (on) await writeRemoteTextFile(abs, text, expected, on);
         else await writeTextFile(abs, text, expected);
+        if (this.reloadToken !== token || this.closed) return;
+        this.savedText = text;
+        clearBuffered(tabFileKey(this.root, this.file));
+        this.saveConflict = null;
+        const current = this.code?.value() ?? text;
+        this.setDirty(current !== this.savedText, inner, false);
+        notify({ title: "Saved", body: splitPathInfo(this.file).base, level: "success", timeout: 1400 });
+      } catch (error) {
+        if (this.reloadToken === token && !this.closed) {
+          let fresh = null;
+          let changed = false;
+          try {
+            fresh = await readTextFile(abs, { on });
+            changed = fresh !== null && fresh !== expected;
+          } catch {}
+          if (this.reloadToken !== token || this.closed) return;
+          if (changed) {
+            this.saveConflict = { text, fresh };
+            this.dialog = { kind: "save-conflict" };
+          } else {
+            notify({ title: "Could not save", body: cleanError(String(error)), level: "error", timeout: 5000 });
+          }
+        }
+      } finally {
+        if (this.reloadToken === token) this.saving = false;
+        inner.notify();
+      }
+    });
+  }
+
+  confirmSaveConflict(cx) {
+    const conflict = this.saveConflict;
+    if (!conflict) return;
+    this.dialog = null;
+    this.saveConflict = null;
+    const abs = this.abs;
+    const on = this.on;
+    const text = this.code?.value() ?? conflict.text;
+    const token = {};
+    this.reloadToken = token;
+    this.saving = true;
+    cx.notify();
+    cx.spawn(async (inner) => {
+      try {
+        const fresh = await readTextFile(abs, { on });
+        if (on) await writeRemoteTextFile(abs, text, fresh, on);
+        else await writeTextFile(abs, text, fresh);
         if (this.reloadToken !== token || this.closed) return;
         this.savedText = text;
         clearBuffered(tabFileKey(this.root, this.file));
@@ -2848,6 +2897,7 @@ export default class FarrierFiles extends View {
 
   confirmReload(cx) {
     this.dialog = null;
+    this.saveConflict = null;
     clearBuffered(tabFileKey(this.root, this.file));
     this.loadFile(cx, { force: true });
   }
