@@ -29,6 +29,9 @@ import {
   window,
   props,
   layout,
+  shared,
+  setShared,
+  run,
   closeOverlay,
   openOverlay,
   nextCommand,
@@ -241,6 +244,22 @@ function dirName(path) {
   const parts = path.split("/");
   parts.pop();
   return parts.join("/");
+}
+
+function fileTabKey(root, path) {
+  const folder = String(root ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const file = String(path ?? "").replace(/\\/g, "/");
+  return JSON.stringify([folder, file]);
+}
+
+function uniqueTabName(path, names) {
+  const base = baseName(path) || path;
+  if (!names.has(base)) return base;
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = `${base} (${index})`;
+    if (!names.has(candidate)) return candidate;
+  }
+  return `${base} (${names.size + 1})`;
 }
 
 function ago(at) {
@@ -525,8 +544,22 @@ function button(t, id, label, variant, onClick, options = {}) {
 export default class FarrierGit extends View {
   init(_props, cx) {
     const p = props() ?? {};
-    this.mode = p.mode === "diff" ? "diff" : p.mode === "branches" ? "branches" : p.mode === "stashes" ? "stashes" : "changes";
+    this.mode = p.mode === "diff" ? "diff" : p.mode === "branches" ? "branches" : p.mode === "stashes" ? "stashes" : p.mode === "file-menu" ? "file-menu" : "changes";
     this.handle = cx.focus_handle();
+    if (this.mode === "file-menu") {
+      this.overlayId = props().overlay;
+      this.root = p.root ?? null;
+      this.context = { key: "", cwd: this.root, on: p.on ?? null, space: p.space ?? null };
+      this.fileMenu = {
+        path: p.path ?? "",
+        kind: p.kind === "staged" ? "staged" : "changes",
+        staged: p.kind === "staged",
+        file: { path: p.path ?? "", status: p.status ?? "M", fresh: Boolean(p.fresh), conflict: false },
+      };
+      this.handle.focus();
+      cx.timer.after(30, () => this.handle.focus());
+      return;
+    }
     this.note = null;
     this.noteKind = "";
     this.noteTask = null;
@@ -562,6 +595,8 @@ export default class FarrierGit extends View {
     this.discardAll = false;
     this.folded = { staged: false, changes: false };
     this.menu = null;
+    this.fileMenu = null;
+    this.diffOverlay = null;
     this.stashes = null;
     this.stashLoading = false;
     this.stashError = null;
@@ -677,6 +712,7 @@ export default class FarrierGit extends View {
       this.diff = {
         root: p.root,
         on: p.on ?? null,
+        space: p.space ?? null,
         path: p.path ?? "",
         staged: Boolean(p.staged),
         fresh: Boolean(p.fresh),
@@ -685,6 +721,9 @@ export default class FarrierGit extends View {
         width: 600,
         error: null,
       };
+      const overlayId = props().overlay;
+      this.overlayId = overlayId;
+      this.diffClosing = false;
       this.handle.focus();
       cx.timer.after(80, () => this.handle.focus());
       this.loadDiff(cx);
@@ -810,6 +849,13 @@ export default class FarrierGit extends View {
       this.branchAction = null;
       this.branchSource = null;
       this.menu = null;
+      this.fileMenu = null;
+      if (this.diffOverlay) {
+        try {
+          closeOverlay(this.diffOverlay);
+        } catch {}
+        this.diffOverlay = null;
+      }
       this.stashes = null;
       this.stashLoading = false;
       this.stashError = null;
@@ -1699,7 +1745,7 @@ export default class FarrierGit extends View {
 
   openDiff(file, staged, cx) {
     if (!this.root) return;
-    openOverlay({
+    this.diffOverlay = openOverlay({
       mod: "farrier-git",
       kind: "window",
       key: "farrier-git-diff",
@@ -1710,6 +1756,7 @@ export default class FarrierGit extends View {
         mode: "diff",
         root: this.root,
         on: this.context?.on ?? null,
+        space: this.context?.space ?? null,
         path: file.path,
         staged,
         fresh: Boolean(file.fresh),
@@ -1717,6 +1764,77 @@ export default class FarrierGit extends View {
       },
     });
     cx.notify();
+  }
+
+  filesAvailable() {
+    try {
+      if (findModPaths(layout(), "farrier-files").length) return true;
+    } catch {}
+    return panes().some((pane) => pane.mod === "farrier-files");
+  }
+
+  openFileMenu(file, kind, staged, cx) {
+    if (!this.root) return;
+    this.menu = null;
+    const withFiles = this.filesAvailable();
+    openOverlay({
+      mod: "farrier-git",
+      kind: "popup",
+      frame: "none",
+      width: 190,
+      height: withFiles ? 124 : 90,
+      props: {
+        mode: "file-menu",
+        root: this.root,
+        on: this.context?.on ?? null,
+        space: this.context?.space ?? null,
+        path: file.path,
+        kind,
+        staged,
+        fresh: Boolean(file.fresh),
+        status: file.status,
+      },
+    });
+    cx.notify();
+  }
+
+  openFileTab(path, cx) {
+    if (!this.root) return;
+    const space = spaces().find((item) => item.active);
+    const live = new Set((space?.tabs ?? []).map((tab) => tab.id));
+    const key = fileTabKey(this.root, path);
+    const known = (shared("farrier.files.tabs") ?? {})[key];
+    if (known?.tabId && live.has(known.tabId)) {
+      run("tab.select", { id: known.tabId });
+      this.rememberSelectedFile(path);
+      return;
+    }
+    const names = new Set((space?.tabs ?? []).map((tab) => tab.name));
+    const name = uniqueTabName(path, names);
+    const tabProps = { folder: this.root, file: path };
+    if (this.context?.on) tabProps.on = this.context.on;
+    run("tab.new", { name, mod: "farrier-files", props: tabProps });
+    this.rememberSelectedFile(path);
+    const spaceId = space?.id ?? null;
+    cx.spawn(async (inner) => {
+      await inner.sleep(80);
+      const target = spaces().find((item) => item.id === spaceId);
+      const tab = (target?.tabs ?? []).find((item) => item.name === name && !item.settled);
+      if (!tab) return;
+      const map = shared("farrier.files.tabs") ?? {};
+      setShared("farrier.files.tabs", {
+        ...map,
+        [key]: { tabId: tab.id, name, preview: false, space: target?.id ?? null },
+      });
+      inner.notify();
+    });
+    cx.notify();
+  }
+
+  rememberSelectedFile(path) {
+    const saved = shared("farrier.files.open");
+    const paths = saved?.root === this.root && Array.isArray(saved.paths) ? saved.paths : [];
+    setShared("farrier.files.open", { root: this.root, paths, selected: path });
   }
 
   // ---- branches --------------------------------------------------------------
@@ -2268,6 +2386,16 @@ export default class FarrierGit extends View {
 
   renderDiff(t, cx) {
     const diff = this.diff;
+    if (diff?.space && !this.diffClosing) {
+      const active = spaces().find((space) => space.active);
+      if (active?.id && active.id !== diff.space) {
+        this.diffClosing = true;
+        cx.spawn(async (inner) => {
+          await inner.sleep(0);
+          if (this.overlayId) closeOverlay(this.overlayId);
+        });
+      }
+    }
     const name = baseName(diff?.path ?? "");
     const directory = dirName(diff?.path ?? "");
     const file = { path: diff?.path ?? "", status: diff?.status ?? "M", fresh: diff?.fresh, conflict: false };
@@ -2358,6 +2486,7 @@ export default class FarrierGit extends View {
   render(cx) {
     const t = theme();
     if (this.mode === "diff") return this.renderDiff(t, cx);
+    if (this.mode === "file-menu") return this.renderFileMenu(t, cx);
     this.watchCommands(cx);
     if (!checking() && this.panelShown() && (this.stale || this.context?.key !== contextKey())) {
       this.stale = false;
@@ -2515,6 +2644,49 @@ export default class FarrierGit extends View {
       );
   }
 
+  renderFileMenu(t, cx) {
+    const target = this.fileMenu;
+    if (!target) return div();
+    const item = (id, iconName, label, onClick) =>
+      h_flex()
+        .id(`farrier-git-file-menu-${id}`)
+        .w_full()
+        .h(31)
+        .flex_none()
+        .px(9)
+        .gap(8)
+        .items_center()
+        .rounded(7)
+        .text_size(11.5)
+        .text_color(t.foreground)
+        .cursor_pointer()
+        .hover((s) => s.bg(t.hover))
+        .on_click((_event, cx) => {
+          onClick(cx);
+          if (this.overlayId) closeOverlay(this.overlayId);
+          else this.fileMenu = null;
+        })
+        .child(icon(iconName, t.muted, 14))
+        .child(div().flex_1().min_w(0).truncate().child(label));
+    return div()
+      .id("farrier-git-file-menu")
+      .w_full()
+      .p(5)
+      .rounded(10)
+      .border_1()
+      .border_color(t.border)
+      .bg(t.popover)
+      .shadow_lg()
+      .children([
+        ...(this.filesAvailable() ? [item("open-file", "file", "Open file", (cx) => this.openFileTab(target.path, cx))] : []),
+        item("open-diff", "code", "Open diff", (cx) => this.openDiff(target.file, target.staged, cx)),
+        div().h(1).mx(6).my(4).bg(t.border),
+        item("copy-path", "copy", "Copy path", (cx) => {
+          if (this.root) cx.write_to_clipboard(absoluteFilePath(this.root, target.path));
+        }),
+      ]);
+  }
+
   renderHeader(t, cx) {
     const busy = this.loading || this.busy || this.generating;
     return h_flex()
@@ -2537,7 +2709,10 @@ export default class FarrierGit extends View {
             .open(Boolean(this.menu))
             .on_open_change((open, cx) => {
               if (!open) this.menu = null;
-              else if (!this.menu) this.menu = "root";
+              else {
+                if (!this.menu) this.menu = "root";
+                this.fileMenu = null;
+              }
               cx.notify();
             })
             .trigger(menuTrigger(t))
@@ -3125,7 +3300,7 @@ export default class FarrierGit extends View {
     const directory = dirName(file.path);
     const color = statusColor(t, file);
     const staged = kind === "staged";
-    return h_flex()
+    const row = h_flex()
       .id(`farrier-git-${kind}-${file.path}`)
       .h(36)
       .flex_none()
@@ -3136,6 +3311,10 @@ export default class FarrierGit extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click((_event, cx) => this.openDiff(file, staged, cx))
+      .on_mouse_down("right", (_event, cx) => {
+        cx.stop_propagation();
+        this.openFileMenu(file, kind, staged, cx);
+      })
       .when(Boolean(this.root), (el) =>
         el.drag_paths([absoluteFilePath(this.root, file.path)], this.context?.on ? { on: this.context.on } : undefined),
       )
@@ -3156,6 +3335,7 @@ export default class FarrierGit extends View {
       .when(file.conflict, (el) => el.child(iconButton(t, `farrier-git-resolve-${file.path}`, "merge", "Resolve conflict", (cx) => this.askConflict(file, cx), { disabled: busy, size: 22, glyphSize: 12, color: t.blocked, stopDrag: true })))
       .child(iconButton(t, `farrier-git-toggle-${kind}-${file.path}`, file.conflict ? "check" : staged ? "minus" : "plus", file.conflict ? "Mark resolved (stage file)" : staged ? "Unstage file" : "Stage file", (cx) => (staged ? this.unstage([file], cx) : this.stage([file], cx)), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true }))
       .when(!staged && !file.conflict, (el) => el.child(iconButton(t, `farrier-git-discard-${file.path}`, "undo", "Discard changes in file", (cx) => this.askDiscard(file, cx), { disabled: busy, size: 22, glyphSize: 12, stopDrag: true })));
+    return row;
   }
 
   renderNote(t, cx) {
@@ -3568,6 +3748,12 @@ export default class FarrierGit extends View {
     if (event.key === "escape") {
       if (this.menu) {
         this.menu = null;
+        cx.notify();
+        cx.stop_propagation();
+        return;
+      }
+      if (this.fileMenu) {
+        this.fileMenu = null;
         cx.notify();
         cx.stop_propagation();
         return;

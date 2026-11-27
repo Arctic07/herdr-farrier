@@ -3,7 +3,9 @@
 The Changes panel, opened by the **Changes** button in the tab bar. It follows
 the focused pane's folder: staged and unstaged files, branches, stashes, a diff
 window, and a commit box above the file list. The ellipsis beside the title
-opens push, pull, fetch, branches and stashes.
+opens push, pull, fetch, branches and stashes. A diff window belongs to the
+space it was opened from and closes when another space becomes active, so it
+never outlives the project it describes.
 
 ## Install alone
 
@@ -28,7 +30,10 @@ stack's `changes` child at `farrier-git`.
   stages, unstages, or discards one file; a group header stages or unstages all
   of them. The Changes header also discards all working changes after a
   confirmation; untracked files are deleted then. Clicking a file opens its diff
-  in a window. A row can be dragged into a terminal, where its absolute path
+  in a window. Right-clicking one opens a small menu: **Open file** opens the
+  same file tab the Files panel opens, reusing that tab and selecting the file
+  in the tree; **Open diff** does what the click does; **Copy path** copies its
+  absolute path. A row can be dragged into a terminal, where its absolute path
   is inserted. Large change sets get a filter above the list; each group shows
   100 rows and adds 100 at a time up to 300.
 - **Conflicts**: conflicts appear in a red card above Changes with **Use current
