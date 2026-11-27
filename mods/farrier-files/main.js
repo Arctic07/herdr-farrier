@@ -70,6 +70,7 @@ import {
   findMatches,
   groupMatches,
   matchIndexAtLine,
+  nearestMatchIndex,
   parseGrepOutput,
   parseRgJson,
   pathMatchesGlobs,
@@ -87,6 +88,7 @@ import {
   parseSearchFileList,
   prepareSearchQuery,
 } from "./search-logic.js";
+import { toggleCommentText, commentStyleFor } from "./comment-logic.js";
 import { expandReplacement, applyPreserveCase } from "./search-logic.js";
 import {
   imageSizeFromBase64,
@@ -155,6 +157,16 @@ function location() {
 }
 
 const contextKey = () => JSON.stringify(location());
+
+/** True when two values differ by exactly one inserted or removed LF. */
+function oneLineBreakApart(before, after) {
+  if (typeof before !== "string" || typeof after !== "string" || Math.abs(before.length - after.length) !== 1) return false;
+  const longer = before.length > after.length ? before : after;
+  const shorter = before.length > after.length ? after : before;
+  let at = 0;
+  while (at < shorter.length && longer[at] === shorter[at]) at += 1;
+  return longer[at] === "\n" && longer.slice(at + 1) === shorter.slice(at);
+}
 
 function findModPaths(node, mod, path = [], out = []) {
   if (!node) return out;
@@ -708,17 +720,33 @@ export default class FarrierFiles extends View {
       current: 0,
       valid: true,
       error: null,
+      retarget: false,
+      navigatedQuery: null,
+      queryBeforeBreak: null,
     };
 
     this.findInput = TextareaState.new({ placeholder: "Find", value: this.find.query, rows: 1 });
     this.findInput.set_auto_grow(1, 3);
     this.findInput.set_soft_wrap(true);
     this.findInput.on("change", (_event, cx) => {
-      this.find.query = this.findInput.value();
-      this.find.current = 0;
+      const before = this.find.query;
+      const value = this.findInput.value();
+      this.find.query = value;
+      // Enter inserts a line break before its submit arrives. That one break
+      // should not look like a changed query, and Shift+Enter is the only way
+      // to add one deliberately.
+      if (!oneLineBreakApart(before, value)) {
+        this.find.current = 0;
+        this.find.retarget = true;
+        this.find.queryBeforeBreak = null;
+      } else if (value.length > before.length) {
+        this.find.queryBeforeBreak = before;
+      } else {
+        this.find.queryBeforeBreak = null;
+      }
       this.refreshFindSoon(cx);
     });
-    this.findInput.on("submit", (event, cx) => this.stepFind(event?.shift ? -1 : 1, cx));
+    this.findInput.on("submit", (event, cx) => this.onFindSubmit(event, cx));
     this.findInput.on("focus", (_event) => {
       this.findFocus = "query";
       this.inputFocused = true;
@@ -3093,6 +3121,11 @@ export default class FarrierFiles extends View {
     this.find.matches = result.matches;
     this.find.valid = result.valid;
     this.find.error = result.error;
+    if (this.find.retarget) {
+      const selection = this.code?.selected_range();
+      this.find.current = nearestMatchIndex(this.find.matches, selection?.start ?? 0);
+      this.find.retarget = false;
+    }
     if (!this.find.matches.length) this.find.current = 0;
     else this.find.current = Math.max(0, Math.min(this.find.current, this.find.matches.length - 1));
   }
@@ -3146,7 +3179,16 @@ export default class FarrierFiles extends View {
     }
     this.persistFindPrefs();
     this.refreshFind();
-    if (this.find.matches.length && this.find.current >= 0) this.setFindMatchSelection(this.find.current, false);
+    this.find.retarget = false;
+    this.find.queryBeforeBreak = null;
+    if (this.find.matches.length) {
+      const selection = this.code?.selected_range();
+      this.find.current = nearestMatchIndex(this.find.matches, selection?.start ?? 0);
+      this.setFindMatchSelection(this.find.current, false);
+      this.find.navigatedQuery = this.find.query;
+    } else {
+      this.find.navigatedQuery = null;
+    }
     cx.notify();
     cx.spawn(async (inner) => {
       await inner.sleep(40);
@@ -3160,6 +3202,7 @@ export default class FarrierFiles extends View {
     this.find.replaceOpen = false;
     this.persistFindPrefs();
     this.find.current = 0;
+    this.find.queryBeforeBreak = null;
     cx.notify();
     if (options.focus !== false) {
       cx.spawn(async (inner) => {
@@ -3186,6 +3229,8 @@ export default class FarrierFiles extends View {
     this.find[name] = !this.find[name];
     if (this.find[name] && name === "regex") this.find.wholeWord = false;
     this.find.current = 0;
+    this.find.retarget = true;
+    this.find.navigatedQuery = null;
     this.refreshFind();
     this.persistFindPrefs();
     cx.notify();
@@ -3216,6 +3261,8 @@ export default class FarrierFiles extends View {
   selectFindIndex(index, cx) {
     if (!Number.isFinite(index) || !this.find.matches[index]) return;
     this.find.current = index;
+    this.find.navigatedQuery = this.find.query;
+    this.find.retarget = false;
     this.setFindMatchSelection(index, true);
     cx.notify();
   }
@@ -3223,6 +3270,8 @@ export default class FarrierFiles extends View {
   stepFind(delta, cx) {
     if (!this.find.matches.length) return;
     this.find.current = stepMatchIndex(this.find.current, delta, this.find.matches.length);
+    this.find.navigatedQuery = this.find.query;
+    this.find.retarget = false;
     this.setFindMatchSelection(this.find.current, true);
     this.findScroll?.scroll_to_item(this.find.current, "center");
     cx.notify();
@@ -3230,6 +3279,50 @@ export default class FarrierFiles extends View {
       await inner.sleep(30);
       if (this.find.open && this.panelShown()) this.findInput.focus();
     });
+  }
+
+  onFindSubmit(event, cx) {
+    if (!this.find.open) return;
+    const shift = Boolean(event?.shift);
+    // Shift+Enter is the one chord that inserts a line break here. Every
+    // other Enter jumps to the nearest match, then walks forward.
+    if (shift && !event?.secondary) return;
+    this.removeSubmittedBreak();
+    this.refreshFind();
+    if (!this.find.matches.length) {
+      cx.notify();
+      return;
+    }
+    if (this.find.query !== this.find.navigatedQuery) {
+      const selection = this.code?.selected_range();
+      this.find.current = nearestMatchIndex(this.find.matches, selection?.start ?? 0);
+      this.find.navigatedQuery = this.find.query;
+      this.find.retarget = false;
+      this.setFindMatchSelection(this.find.current, true);
+      this.findScroll?.scroll_to_item(this.find.current, "center");
+      cx.notify();
+      return;
+    }
+    this.stepFind(shift ? -1 : 1, cx);
+  }
+
+  removeSubmittedBreak() {
+    const before = this.find.queryBeforeBreak ?? this.find.query;
+    const value = this.findInput.value();
+    this.find.queryBeforeBreak = null;
+    if (value.length !== before.length + 1) {
+      this.find.query = value;
+      return;
+    }
+    let at = 0;
+    while (at < before.length && value[at] === before[at]) at += 1;
+    if (value[at] !== "\n" || value.slice(at + 1) !== before.slice(at)) {
+      this.find.query = value;
+      return;
+    }
+    this.findInput.set_selected_range({ start: at, end: at + 1 });
+    this.findInput.replace("");
+    this.find.query = this.findInput.value();
   }
 
   replaceCurrent(cx) {
@@ -3297,7 +3390,28 @@ export default class FarrierFiles extends View {
     this.findInput.set_value(this.find.query);
     this.refreshFind();
     if (value.line) this.find.current = matchIndexAtLine(this.find.matches, Number(value.line));
+    this.find.navigatedQuery = this.find.query;
+    this.find.retarget = false;
     this.setFindMatchSelection(this.find.current, false);
+  }
+
+  toggleComment(cx) {
+    if (!this.code || this.viewMode !== "code" || !this.canEdit()) return;
+    const style = commentStyleFor(this.file);
+    if (!style) return;
+    const selection = this.code.selected_range();
+    const result = toggleCommentText(this.code.value(), selection.start, selection.end, style);
+    if (!result) return;
+    this.code.set_selected_range({ start: result.start, end: result.oldEnd });
+    this.code.replace(result.text);
+    const value = this.code.value();
+    this.text = value;
+    this.lineCount = lineCount(value);
+    this.promotePreview(cx);
+    this.setDirty(value !== this.savedText, cx, false);
+    this.code.set_selected_range({ start: result.start, end: result.end });
+    if (this.find.open) this.refreshFind();
+    cx.notify();
   }
 
   onFileKey(event, cx) {
@@ -3312,6 +3426,15 @@ export default class FarrierFiles extends View {
     }
     if (key === "escape" && this.find.open) {
       this.closeFind(cx);
+      cx.stop_propagation();
+      return;
+    }
+    if (
+      (mods.control || mods.platform) &&
+      !mods.alt &&
+      (key === "/" || key === "slash" || key === "?" || event.keystroke === "ctrl-/" || event.keystroke === "cmd-/")
+    ) {
+      if (!this.inputFocused) this.toggleComment(cx);
       cx.stop_propagation();
       return;
     }

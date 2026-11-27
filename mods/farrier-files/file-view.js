@@ -514,8 +514,8 @@ export function renderFindPanel(view, t, cx) {
         .child(div().flex_1().min_w(0).child(filterField(t, view.findInput, "Find", null, false, true)),
         )
         .child(div().flex_none().max_w(92).truncate().text_size(10).text_color(view.find.valid ? t.dim : t.blocked).child(counterText(view)))
-        .child(toolButton(t, "farrier-files-find-prev", "arrow-up", t.dim, "Previous match (Ctrl+Shift+Enter)", (c) => view.stepFind(-1, c), { size: 20, iconSize: 11 }))
-        .child(toolButton(t, "farrier-files-find-next", "arrow-down", t.dim, "Next match (Ctrl+Enter)", (c) => view.stepFind(1, c), { size: 20, iconSize: 11 }))
+        .child(toolButton(t, "farrier-files-find-prev", "arrow-up", t.dim, "Previous match (Ctrl+Shift+Enter, Shift+F3)", (c) => view.stepFind(-1, c), { size: 20, iconSize: 11 }))
+        .child(toolButton(t, "farrier-files-find-next", "arrow-down", t.dim, "Next match (Enter, Ctrl+Enter, F3)", (c) => view.stepFind(1, c), { size: 20, iconSize: 11 }))
         .child(toolButton(t, "farrier-files-find-close", "close", t.dim, "Close find (Esc)", (c) => view.closeFind(c), { size: 20, iconSize: 10 }),
         ),
     )

@@ -179,6 +179,23 @@ export function matchIndexAtLine(matches, line) {
   return best;
 }
 
+/** The match under the caret, or the closest one beside it. */
+export function nearestMatchIndex(matches, offset) {
+  if (!matches.length) return 0;
+  const target = Math.max(0, Number(offset) || 0);
+  let best = 0;
+  let distance = Infinity;
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i];
+    const gap = target < match.start ? match.start - target : target > match.end ? target - match.end : 0;
+    if (gap <= distance) {
+      best = i;
+      distance = gap;
+    }
+  }
+  return best;
+}
+
 export function contextSegments(lineText, startColumn, endColumn, maxChars = 180) {
   const text = String(lineText ?? "").replace(/\r$/, "");
   const start = Math.max(0, Math.min(text.length, Number(startColumn) || 0));

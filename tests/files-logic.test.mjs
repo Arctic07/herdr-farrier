@@ -50,7 +50,9 @@ import {
   normalizeQueryLineEndings,
   parseSearchFileList,
   prepareSearchQuery,
+  nearestMatchIndex,
 } from "../mods/farrier-files/search-logic.js";
+import { commentStyleFor, toggleCommentText, selectedLineRange } from "../mods/farrier-files/comment-logic.js";
 import {
   FILE_NAMES as FILES_NAMES,
   FILE_EXTENSIONS as FILES_EXTENSIONS,
@@ -293,6 +295,63 @@ test("base64 round trip and UTF-8", () => {
   const encoded = utf8ToBase64(text);
   assert.equal(encoded, Buffer.from(text, "utf8").toString("base64"));
   assert.deepEqual(decodeBase64(encoded), [...Buffer.from(text, "utf8")]);
+});
+
+test("comment toggles follow the file's language", () => {
+  assert.equal(commentStyleFor("app.ts").line, "//");
+  assert.equal(commentStyleFor("run.py").line, "#");
+  assert.equal(commentStyleFor("query.sql").line, "--");
+  assert.deepEqual(commentStyleFor("page.html").block, ["<!--", "-->"]);
+  assert.deepEqual(commentStyleFor("style.css").block, ["/*", "*/"]);
+  assert.equal(commentStyleFor("data.json"), null);
+  assert.equal(commentStyleFor("data.jsonc").line, "//");
+  assert.equal(commentStyleFor("notes.txt"), null);
+});
+
+test("line comments toggle whole selected lines and keep indentation", () => {
+  const js = "const a = 1;\n  const b = 2;";
+  const style = commentStyleFor("app.ts");
+  const on = toggleCommentText(js, 0, js.length, style);
+  assert.equal(on.text, "// const a = 1;\n  // const b = 2;");
+  assert.deepEqual({ start: on.start, end: on.end }, { start: 0, end: on.text.length });
+  const off = toggleCommentText(on.text, on.start, on.end, style);
+  assert.equal(off.text, js);
+  const mixed = toggleCommentText("// a\nconst b", 0, 13, style);
+  assert.equal(mixed.text, "// a\n// const b");
+  const py = toggleCommentText("a = 1", 0, 0, commentStyleFor("run.py"));
+  assert.equal(py.text, "# a = 1");
+  const source = "import {\nv_flex,\nh_flex,";
+  const one = toggleCommentText(source, 8, 8, style);
+  assert.equal(one.text, "// import {");
+  const applied = source.slice(0, one.start) + one.text + source.slice(one.oldEnd);
+  assert.equal(applied, "// import {\nv_flex,\nh_flex,");
+  const back = toggleCommentText(applied, one.start, one.end, style);
+  const restored = applied.slice(0, back.start) + back.text + applied.slice(back.oldEnd);
+  assert.equal(restored, source);
+});
+
+test("block comments wrap and unwrap a selection", () => {
+  const html = "<div>x</div>";
+  const style = commentStyleFor("page.html");
+  const on = toggleCommentText(html, 0, html.length, style);
+  assert.equal(on.text, "<!--<div>x</div>-->");
+  const off = toggleCommentText(on.text, 0, on.text.length, style);
+  assert.equal(off.text, html);
+  const css = "  a\nb";
+  const cssStyle = commentStyleFor("style.css");
+  const wrapped = toggleCommentText(css, 0, css.length, cssStyle);
+  assert.equal(wrapped.text, "  /*a\nb*/");
+  const unwrapped = toggleCommentText(wrapped.text, 0, wrapped.text.length, cssStyle);
+  assert.equal(unwrapped.text, css);
+  assert.deepEqual(selectedLineRange("a\nb\nc", 0, 2), { start: 0, end: 1 });
+});
+
+test("nearest match follows the caret", () => {
+  const matches = [{ start: 0, end: 3 }, { start: 10, end: 13 }, { start: 30, end: 33 }];
+  assert.equal(nearestMatchIndex(matches, 2), 0);
+  assert.equal(nearestMatchIndex(matches, 11), 1);
+  assert.equal(nearestMatchIndex(matches, 20), 1);
+  assert.equal(nearestMatchIndex(matches, 40), 2);
 });
 
 test("file icons are shared by both panels", () => {

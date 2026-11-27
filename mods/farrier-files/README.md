@@ -101,11 +101,13 @@ layout it sits in the Files stack, opened by the tab bar's **Files** button.
 ## The file tab
 
 - **Editing**: syntax highlighting from the active theme, line numbers, folding,
-  soft wrap, `Ctrl+S` save, dirty dot, and a copy button. `Ctrl+F` opens find
+  soft wrap, `Ctrl+S` save, dirty dot, and a copy button. `Ctrl+/` toggles
+  comments for the file's language: `//`, `#`, `--`, `/* */` or `<!-- -->`;
+  JSON has no comment form. `Ctrl+F` opens find
   and seeds the selected text, even when find already has an older query;
   `Ctrl+H` opens find with the replace row. The find box also accepts a pasted
-  block; `Ctrl+Enter` moves to the next match and `Ctrl+Shift+Enter` to the
-  previous one.
+  block; `Enter` jumps to the nearest match and then the next one, while
+  `Shift+Enter` adds a line break to the query rather than moving.
 - **Find and replace**: `Aa` / `ab` / `.*`, match list with context, previous/next
   (`Ctrl+Shift+Enter` / `Ctrl+Enter`, `F3` / `Shift+F3`), replace one, replace all, and a
   small in-memory undo for replacements (`Ctrl+Z` while find is open).
@@ -155,6 +157,7 @@ install keys of its own, so it never takes a chord from another window.
 | `file-view.js` | File header, editor, find widget, Markdown/SVG/CSV views |
 | `file-kinds.js` | The name and extension table, tints and glyphs shared with the Git panel |
 | `files-logic.js` | Tree building, flattening, filtering, status parsing, names and languages |
+| `comment-logic.js` | Language-aware comment toggling for the editor |
 | `search-logic.js` | Find/replace engine, globs, ripgrep/grep parsing, result grouping |
 | `preview-logic.js` | CSV parsing, SVG dimensions, raster headers, zoom |
 | `xlsx-logic.js` | OOXML workbook, shared strings, styles, sheet tables |
